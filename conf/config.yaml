@@ -1,0 +1,13 @@
+# Test config
+
+defaults:
+  - benchmark_schema   # use as defaults
+  - _self_             # then fill in the rest of the args with below
+
+data_path: /home/cohanlon/alcf_kan_inr/data/nucleon_41x41x41_uint8.raw
+model_types: [pykan]
+# benchmark_metrics: [RA]
+data_shape: [41, 41, 41]
+data_dtype: uint8
+batch_size: 1
+num_epochs: 1
