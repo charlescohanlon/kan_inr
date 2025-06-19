@@ -5,16 +5,16 @@ from src.volumetric_dataset import VolumetricDataset
 import os
 
 # Data
-data_path = "/data/chameleon/chameleon_1024x1024x1080_uint16.raw"
-data_shape = (1024, 1024, 1080)
-data_type = np.uint16
-output_filename = "chameleon_output.csv"
-inr_name = "chameleon"
+data_path = "/data/nucleon/nucleon_41x41x41_uint8.raw"
+data_shape = (41, 41, 41)
+data_type = np.uint8
+output_filename = "nucleon_output.csv"
+inr_name = "nucleon_kan"
 verbose = True
 enable_pbar = True
 
 # Train
-batch_size = int(8e5)
+batch_size = int(8 * 10**4.8)
 shuffle = True
 num_workers = 48
 pin_memory = True
