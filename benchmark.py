@@ -14,18 +14,21 @@ from einops import rearrange
 
 
 @dataclass
-class MLPConfig:
-    in_features: int
-    out_features: int
+class MLP_INR_Config:
+    in_features: int = 3  # x, y, z coordinates
+    out_features: int = 1
     hidden_features: int
-    num_layers: int
-    activation: str
-    bias: bool
+    depth: int
+    activation: str = "SiLU"
+    bias: bool = True
 
 
 @dataclass
-class KANConfig:
-    pass  # TODO: figure out which parameters to include for KAN models
+class KAN_INR_Config:
+    in_features: int = 3
+    out_features: int = 1
+    hidden_features: int
+    depth: int
 
 
 @dataclass
@@ -38,8 +41,8 @@ class BenchmarkConfig:
     num_epochs: int
     model_types: List[str]
     benchmark_metrics: List[str]
-    mlp_params: MLPConfig
-    kan_params: KANConfig
+    mlp_params: MLP_INR_Config
+    kan_params: KAN_INR_Config
 
     # Default parameters
     output_filename: Optional[str] = None
@@ -106,43 +109,55 @@ def create_models(cfg: BenchmarkConfig) -> List[nn.Module]:
     models = []
     for model_type in cfg.model_types:
         if model_type == "MLP":
-            mlp_params = cfg.mlp_params
+            p = cfg.mlp_params
             activation_module = getattr(nn, cfg.mlp_params.activation)
             model = nn.Sequential(
-                nn.Linear(mlp_params.in_features, mlp_params.hidden_features),
-                activation_module(),
                 *[
                     nn.Sequential(
                         nn.Linear(
-                            mlp_params.hidden_features,
-                            mlp_params.hidden_features,
+                            p.in_features,
+                            (p.hidden_features if i < p.depth - 1 else p.out_features),
+                            bias=p.bias,
                         ),
                         activation_module(),
                     )
-                    for _ in range(mlp_params.num_layers - 2)
-                ],
-                nn.Linear(mlp_params.hidden_features, mlp_params.out_features),
+                    for i in range(p.depth - 1)
+                ]
             )
         elif model_type == "pykan":
-            from alcf_kan_inr.pykan.kan.MLP import MLP
+            from alcf_kan_inr.pykan.kan.KANLayer import KANLayer
 
-            model = MLP(
-                width=...,
-                act=...,
-                save_act=...,
+            p = cfg.kan_params
+            model = nn.Sequential(
+                *[
+                    nn.Sequential(
+                        KANLayer(
+                            in_dim=p.in_features,
+                            out_dim=(
+                                p.hidden_features if i < p.depth - 1 else p.out_features
+                            ),
+                        ),
+                    )
+                    for i in range(p.depth - 1)
+                ]
             )
         elif model_type in ["efficient-kan", "e-kan"]:
             from alcf_kan_inr.efficient_kan.src.efficient_kan.kan import KAN
 
+            p = cfg.kan_params
             model = KAN(
-                layers_hidden=...,
-                grid_size=...,
+                layers_hidden=[p.in_features]
+                + [p.hidden_features] * (p.depth - 1)
+                + [p.out_features],
             )
         elif model_type in ["fast-kan", "f-kan"]:
             from alcf_kan_inr.fast_kan.fastkan.fastkan import FastKAN
 
+            p = cfg.kan_params
             model = FastKAN(
-                layers_hidden=...,
+                layers_hidden=[p.in_features]
+                + [p.hidden_features] * (p.depth - 1)
+                + [p.out_features],
             )
         else:
             raise ValueError(f"Unsupported model type: {model_type}")
@@ -162,10 +177,10 @@ def fit_inrs(
         with open(cfg.output_filename, "w") as output_file:
             output_file.write("epoch,avg_loss\n")
 
+    loader = DataLoader(dataset)
     for model in models:
         model.to(device, dtype)
         optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr)
-        loader = DataLoader(dataset)
 
         if cfg.loss_fn == "MSE":
             loss_fn = nn.functional.mse_loss
@@ -174,7 +189,7 @@ def fit_inrs(
 
         model.train()
         for epoch in range(cfg.num_epochs):
-            total_loss = 0
+            total_batch_loss = 0
 
             for x, y_hat in tqdm(loader, disable=not cfg.enable_pbar):
                 x = x.to(device, dtype)
@@ -184,9 +199,9 @@ def fit_inrs(
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                total_loss += loss.item()
+                total_batch_loss += loss.item()
 
-            avg_loss = total_loss / len(loader)
+            avg_loss = total_batch_loss / len(loader)
             if cfg.verbose:
                 print(f"(epoch {epoch}): avg loss = {avg_loss:.4f}")
 
@@ -203,13 +218,13 @@ def evaluate_inrs(
     dataset: VolumetricDataset,
 ):
     metrics = get_metrics(cfg.benchmark_metrics)
+    loader = DataLoader(dataset)
     for model in models:
         model_name = model.__class__.__name__ + "_inr.pt"
         if cfg.save_model:
             torch.save(model, model_name)
 
         model.to(device, dtype)
-        loader = DataLoader(dataset)
 
         model.eval()
         with torch.no_grad():
