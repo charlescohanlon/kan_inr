@@ -1,9 +1,0 @@
-[submodule "pykan"]
-	path = pykan
-	url = https://github.com/KindXiaoming/pykan.git
-[submodule "efficient-kan"]
-	path = efficient_kan
-	url = git@github.com:Blealtan/efficient-kan.git
-[submodule "fast-kan"]
-	path = fast_kan
-	url = git@github.com:ZiyaoLi/fast-kan.git

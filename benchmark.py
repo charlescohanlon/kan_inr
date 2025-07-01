@@ -7,10 +7,12 @@ from omegaconf import OmegaConf
 from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
-from alcf_kan_inr.volumetric_dataset import VolumetricDataset
+from volumetric_dataset import VolumetricDataset
 import torch.nn as nn
 import torcheval.metrics.functional as tmf
 from einops import rearrange
+
+from networks import INR_Base
 
 
 @dataclass
@@ -83,8 +85,16 @@ def main(cfg: BenchmarkConfig):
         normalize_values=True,
     )
 
-    # Create models
-    models = create_models(cfg)
+    # Create model(s)
+    models = [
+        INR_Base(
+            native_encoder=True,
+            network="f-kan",
+            n_hidden_layers=cfg.kan_params.depth,
+            n_neurons=cfg.kan_params.hidden_features,
+            activation="SiLU",  # base activation when network is KAN
+        )
+    ]
 
     # Fit the models
     fit_inrs(
@@ -105,67 +115,6 @@ def main(cfg: BenchmarkConfig):
     )
 
 
-def create_models(cfg: BenchmarkConfig) -> List[nn.Module]:
-    models = []
-    for model_type in cfg.model_types:
-        if model_type == "MLP":
-            p = cfg.mlp_params
-            activation_module = getattr(nn, cfg.mlp_params.activation)
-            model = nn.Sequential(
-                *[
-                    nn.Sequential(
-                        nn.Linear(
-                            p.in_features,
-                            (p.hidden_features if i < p.depth - 1 else p.out_features),
-                            bias=p.bias,
-                        ),
-                        activation_module(),
-                    )
-                    for i in range(p.depth - 1)
-                ]
-            )
-        elif model_type == "pykan":
-            from alcf_kan_inr.pykan.kan.KANLayer import KANLayer
-
-            p = cfg.kan_params
-            model = nn.Sequential(
-                *[
-                    nn.Sequential(
-                        KANLayer(
-                            in_dim=p.in_features,
-                            out_dim=(
-                                p.hidden_features if i < p.depth - 1 else p.out_features
-                            ),
-                        ),
-                    )
-                    for i in range(p.depth - 1)
-                ]
-            )
-        elif model_type in ["efficient-kan", "e-kan"]:
-            from alcf_kan_inr.efficient_kan.src.efficient_kan.kan import KAN
-
-            p = cfg.kan_params
-            model = KAN(
-                layers_hidden=[p.in_features]
-                + [p.hidden_features] * (p.depth - 1)
-                + [p.out_features],
-            )
-        elif model_type in ["fast-kan", "f-kan"]:
-            from alcf_kan_inr.fast_kan.fastkan.fastkan import FastKAN
-
-            p = cfg.kan_params
-            model = FastKAN(
-                layers_hidden=[p.in_features]
-                + [p.hidden_features] * (p.depth - 1)
-                + [p.out_features],
-            )
-        else:
-            raise ValueError(f"Unsupported model type: {model_type}")
-        models.append(model)
-
-    return models
-
-
 def fit_inrs(
     cfg: BenchmarkConfig,
     models: List[nn.Module],
@@ -173,7 +122,7 @@ def fit_inrs(
     dtype: torch.dtype,
     dataset: VolumetricDataset,
 ):
-    if cfg.output_filename is not None:  # NOTE: do we care about this?
+    if cfg.output_filename is not None:
         with open(cfg.output_filename, "w") as output_file:
             output_file.write("epoch,avg_loss\n")
 

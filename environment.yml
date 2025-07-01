@@ -1,0 +1,36 @@
+name: alcf_kan_inr
+
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - libstdcxx-ng=15
+  - mesalib
+  - libglvnd
+  - trame
+  - vtk
+  - python=3.10
+  - pip
+  - pip:
+      - torch
+      - numpy
+      - matplotlib
+      - scikit-learn
+      - scipy
+      - pandas
+      - jupyter
+      - notebook
+      - ipywidgets
+      - tqdm
+      - hydra-core
+      - omegaconf
+      - einops
+      - torcheval
+      - pyvista
+      - ipyvtklink
+
+variables:
+  PYVISTA_OFF_SCREEN: "true"                    # run without an X server
+  LIBGL_ALWAYS_SOFTWARE: "1"                    # choose llvmpipe over GPUs
+  LIBGL_DRIVERS_PATH: "${CONDA_PREFIX}/lib/dri" # Mesa’s swrast_dri.so path
