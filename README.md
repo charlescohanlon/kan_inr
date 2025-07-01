@@ -75,12 +75,7 @@ volume = np.load("data/toy_ct.npy")   # shape (D, H, W)
 
 ## Training from the Command Line
 
-```bash
-python train.py \
-  data.path=data/toy_ct.npy \
-  model.hidden_channels=256 \
-  trainer.max_epochs=400
-```
+WIP
 
 Hydra logs configs & checkpoints under `outputs/`.
 
