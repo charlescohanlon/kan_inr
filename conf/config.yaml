@@ -1,13 +1,35 @@
-# Test config
-
 defaults:
-  - benchmark_schema   # use as defaults
+  - benchmark_schema   # use BenchmarkConfig class as defaults
   - _self_             # then fill in the rest of the args with below
 
-data_path: /home/cohanlon/alcf_kan_inr/data/nucleon_41x41x41_uint8.raw
-model_types: [pykan]
-# benchmark_metrics: [RA]
-data_shape: [41, 41, 41]
-data_dtype: uint8
-batch_size: 1
-num_epochs: 1
+output_filename: "/grand/insitu/cohanlon/alcf_kan_inr/result.csv"
+data_path: "/grand/insitu/cohanlon/datasets/raw/test"
+num_workers: 3    # num_processes_used = # gpus available x (1 + num_workers)
+save_model: False
+enable_pbar: False    # progress bar written to error on PBS
+
+# Model(s)
+model_types: ["mlp", "f-kan"]
+mlp_params:
+  - n_neurons: 64
+    n_hidden_layers: 3
+  - n_neurons: 32
+    n_hidden_layers: 3
+  - n_neurons: 16
+    n_hidden_layers: 3
+  - n_neurons: 8
+    n_hidden_layers: 3
+kan_params:
+  - n_neurons: 64
+    n_hidden_layers: 3
+  - n_neurons: 32
+    n_hidden_layers: 3
+  - n_neurons: 16
+    n_hidden_layers: 3
+  - n_neurons: 8
+    n_hidden_layers: 3
+
+# Training
+batch_size: 32768
+num_epochs: 16
+

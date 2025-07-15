@@ -1,3 +1,4 @@
+from functools import partial
 import os, math
 from typing import Tuple
 
@@ -174,19 +175,6 @@ class HashEmbedderNative(nn.Module):
         return f"hyperparams={self.encoding_config}"
 
 
-def find_activation(activation):
-    if activation == "None":
-        return lambda x: x
-    if activation == "ReLU":
-        return lambda x: F.relu(x, inplace=True)
-    elif activation == "Sigmoid":
-        return F.sigmoid
-    elif activation == "SiLU":
-        return F.silu
-    else:
-        raise NotImplementedError(f"Unknown activation {activation}")
-
-
 MLP_ALIGNMENT = 16
 
 
@@ -236,14 +224,20 @@ class MLP_Native(torch.nn.Module):
             bias=self.bias,
         )
 
-        self.activation = find_activation(activation)
-        self.output_activation = find_activation(output_activation)
+        if activation == "ReLU":
+            self.activation = F.relu
+        elif activation == "Sigmoid":
+            self.activation = F.sigmoid
+        elif activation == "SiLU":
+            self.activation = F.silu
+        else:
+            raise NotImplementedError(f"Unknown activation {activation}")
 
     def forward(self, x):
         x = self.activation(self.first(x))
         for layer in self.hidden:
             x = self.activation(layer(x))
-        return self.output_activation(self.last(x))[..., : self.n_output_dims]
+        return self.last(x)[..., : self.n_output_dims]
 
 
 class FKAN_Native(torch.nn.Module):
@@ -284,13 +278,12 @@ class FKAN_Native(torch.nn.Module):
             grid_max=1.0,
             num_grids=8,
             use_base_update=True,
-            base_activation=find_activation(activation),
+            base_activation=F.silu,
             spline_weight_init_scale=0.1,
         )
-        self.output_activation = find_activation(output_activation)
 
     def forward(self, x):
-        return self.output_activation(self.fkan(x))
+        return self.fkan(x)
 
 
 class INR_Base(nn.Module):
@@ -353,8 +346,8 @@ class INR_Base(nn.Module):
 
     def forward(self, x):
         h = x.float()
-        # h = self.encoder(x).float()
-        # h = F.pad(h, (0, self.n_pad))
+        h = self.encoder(x).float()
+        h = F.pad(h, (0, self.n_pad))
         return self.network(h)
 
 

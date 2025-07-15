@@ -1,0 +1,779 @@
+Benchmark Configuration:
+batch_size: 32768
+num_epochs: 16
+model_types:
+- mlp
+- f-kan
+mlp_params:
+- n_neurons: 64
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+  activation: ReLU
+  bias: true
+- n_neurons: 32
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+  activation: ReLU
+  bias: true
+- n_neurons: 16
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+  activation: ReLU
+  bias: true
+- n_neurons: 8
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+  activation: ReLU
+  bias: true
+kan_params:
+- n_neurons: 64
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+- n_neurons: 32
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+- n_neurons: 16
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+- n_neurons: 8
+  n_hidden_layers: 3
+  in_features: 3
+  out_features: 1
+data_path: /grand/insitu/cohanlon/datasets/raw/test
+data_shape: null
+data_dtype: null
+output_filename: /grand/insitu/cohanlon/alcf_kan_inr/result.csv
+enable_pbar: false
+shuffle: true
+num_workers: 3
+pin_memory: true
+lr: 0.001
+model_dtype: float32
+loss_fn: MSE
+save_model: false
+
+Found files: ['neghip_64x64x64_uint8.raw', 'mrt_angio_416x512x112_uint16.raw', 'nucleon_41x41x41_uint8.raw', 'pawpawsaurus_958x646x1088_uint16.raw', 'tooth_103x94x161_uint8.raw']
+
+Running benchmark for dataset: /grand/insitu/cohanlon/datasets/raw/test/neghip_64x64x64_uint8.raw
+Training MLP_Native_inr233737 on neghip_64x64x64_uint8
+Training MLP_Native_inr595849 on neghip_64x64x64_uint8
+Training MLP_Native_inr70985 on neghip_64x64x64_uint8
+Training MLP_Native_inr551753 on neghip_64x64x64_uint8
+Training FKAN_Native_inr808777 on neghip_64x64x64_uint8
+Training FKAN_Native_inr941449 on neghip_64x64x64_uint8
+Training FKAN_Native_inr430729 on neghip_64x64x64_uint8
+Training FKAN_Native_inr663049 on neghip_64x64x64_uint8
+(epoch 0): mse_loss = 0.16100006736814976
+(epoch 0): mse_loss = 0.04278795886784792
+(epoch 0): mse_loss = 0.14665642753243446
+(epoch 0): mse_loss = 0.03905011713504791
+(epoch 0): mse_loss = 0.26711247116327286
+(epoch 0): mse_loss = 0.1261257315054536
+(epoch 0): mse_loss = 0.030808337731286883
+(epoch 0): mse_loss = 0.3825226426124573
+(epoch 1): mse_loss = 0.03145191352814436
+(epoch 1): mse_loss = 0.10960634984076023
+(epoch 1): mse_loss = 0.09844637010246515
+(epoch 1): mse_loss = 0.02931616362184286
+(epoch 1): mse_loss = 0.09899913147091866
+(epoch 1): mse_loss = 0.11965822987258434
+(epoch 1): mse_loss = 0.2263633031398058
+(epoch 1): mse_loss = 0.03210734925232828
+(epoch 2): mse_loss = 0.031181408558040857
+(epoch 2): mse_loss = 0.09386599622666836
+(epoch 2): mse_loss = 0.07128999382257462
+(epoch 2): mse_loss = 0.02837847569026053
+(epoch 2): mse_loss = 0.15487517975270748
+(epoch 2): mse_loss = 0.07743765693157911
+(epoch 2): mse_loss = 0.07775733433663845
+(epoch 2): mse_loss = 0.03131299582310021
+(epoch 3): mse_loss = 0.030162285780534148
+(epoch 3): mse_loss = 0.07920463848859072
+(epoch 3): mse_loss = 0.05553486384451389
+(epoch 3): mse_loss = 0.027422314044088125
+(epoch 3): mse_loss = 0.11415655165910721
+(epoch 3): mse_loss = 0.06423873594030738
+(epoch 3): mse_loss = 0.06176341697573662
+(epoch 3): mse_loss = 0.03129827999509871
+(epoch 4): mse_loss = 0.02957399538718164
+(epoch 4): mse_loss = 0.06594531890004873
+(epoch 4): mse_loss = 0.04486973164603114
+(epoch 4): mse_loss = 0.026349234860390425
+(epoch 4): mse_loss = 0.0878608301281929
+(epoch 4): mse_loss = 0.0551378526724875
+(epoch 4): mse_loss = 0.05204564146697521
+(epoch 4): mse_loss = 0.030911467969417572
+(epoch 5): mse_loss = 0.028981688199564815
+(epoch 5): mse_loss = 0.054456369020044804
+(epoch 5): mse_loss = 0.037711447570472956
+(epoch 5): mse_loss = 0.02528964076191187
+(epoch 5): mse_loss = 0.07086976524442434
+(epoch 5): mse_loss = 0.048662098590284586
+(epoch 5): mse_loss = 0.03071374027058482
+(epoch 5): mse_loss = 0.04573376849293709
+(epoch 6): mse_loss = 0.028438379988074303
+(epoch 6): mse_loss = 0.045174488332122564
+(epoch 6): mse_loss = 0.032868794398382306
+(epoch 6): mse_loss = 0.024298013420775533
+(epoch 6): mse_loss = 0.0438829711638391
+(epoch 6): mse_loss = 0.05951382918283343
+(epoch 6): mse_loss = 0.030604073777794838
+(epoch 6): mse_loss = 0.04105549491941929
+(epoch 7): mse_loss = 0.027895438950508833
+(epoch 7): mse_loss = 0.038468129467219114
+(epoch 7): mse_loss = 0.029230038868263364
+(epoch 7): mse_loss = 0.02337201521731913
+(epoch 7): mse_loss = 0.051139358431100845
+(epoch 7): mse_loss = 0.04021056415513158
+(epoch 7): mse_loss = 0.0305017433129251
+(epoch 7): mse_loss = 0.037488711066544056
+(epoch 8): mse_loss = 0.02728811069391668
+(epoch 8): mse_loss = 0.034481726586818695
+(epoch 8): mse_loss = 0.026510939933359623
+(epoch 8): mse_loss = 0.022599966498091817
+(epoch 8): mse_loss = 0.03733117692172527
+(epoch 8): mse_loss = 0.04463124182075262
+(epoch 8): mse_loss = 0.03039480047300458
+(epoch 8): mse_loss = 0.03516710223630071
+(epoch 9): mse_loss = 0.026636602822691202
+(epoch 9): mse_loss = 0.03274787776172161
+(epoch 9): mse_loss = 0.02433188329450786
+(epoch 9): mse_loss = 0.021931983530521393
+(epoch 9): mse_loss = 0.03501910949125886
+(epoch 9): mse_loss = 0.039727984461933374
+(epoch 9): mse_loss = 0.0302841083612293
+(epoch 9): mse_loss = 0.03358511719852686
+(epoch 10): mse_loss = 0.0259276011493057
+(epoch 10): mse_loss = 0.03219434525817633
+(epoch 10): mse_loss = 0.02257466781884432
+(epoch 10): mse_loss = 0.021303751040250063
+(epoch 10): mse_loss = 0.035866574849933386
+(epoch 10): mse_loss = 0.03312455350533128
+(epoch 10): mse_loss = 0.030165109783411026
+(epoch 10): mse_loss = 0.032363973557949066
+(epoch 11): mse_loss = 0.03182912338525057
+(epoch 11): mse_loss = 0.025190234184265137
+(epoch 11): mse_loss = 0.021112861577421427
+(epoch 11): mse_loss = 0.020720261381939054
+(epoch 11): mse_loss = 0.032768203876912594
+(epoch 11): mse_loss = 0.030032553942874074
+(epoch 11): mse_loss = 0.03152901376597583
+(epoch 11): mse_loss = 0.03136708168312907
+(epoch 12): mse_loss = 0.031390711199492216
+(epoch 12): mse_loss = 0.024451163364574313
+(epoch 12): mse_loss = 0.01987771177664399
+(epoch 12): mse_loss = 0.02013198542408645
+(epoch 12): mse_loss = 0.030195417581126094
+(epoch 12): mse_loss = 0.03006885340437293
+(epoch 12): mse_loss = 0.030540789244696498
+(epoch 12): mse_loss = 0.029884224524721503
+(epoch 13): mse_loss = 0.031067126197740436
+(epoch 13): mse_loss = 0.023779206443578005
+(epoch 13): mse_loss = 0.018779776757583022
+(epoch 13): mse_loss = 0.01957262959331274
+(epoch 13): mse_loss = 0.027933909790590405
+(epoch 13): mse_loss = 0.02880700770765543
+(epoch 13): mse_loss = 0.029716274933889508
+(epoch 13): mse_loss = 0.029815965797752142
+(epoch 14): mse_loss = 0.030891152564436197
+(epoch 14): mse_loss = 0.023215703666210175
+(epoch 14): mse_loss = 0.017848246498033404
+(epoch 14): mse_loss = 0.019127381732687354
+(epoch 14): mse_loss = 0.025856389431282878
+(epoch 14): mse_loss = 0.02767057134769857
+(epoch 14): mse_loss = 0.029193473048508167
+(epoch 14): mse_loss = 0.029517750488594174
+(epoch 15): mse_loss = 0.030759066343307495
+Finished training MLP_Native_inr595849 for 16 epochs.
+
+Evaluating MLP_Native_inr595849:
+(epoch 15): mse_loss = 0.022810746217146516
+Finished training MLP_Native_inr551753 for 16 epochs.
+
+Evaluating MLP_Native_inr551753:
+(epoch 15): mse_loss = 0.017009473405778408
+Finished training FKAN_Native_inr808777 for 16 epochs.
+
+Evaluating FKAN_Native_inr808777:
+(epoch 15): mse_loss = 0.018789665773510933
+Finished training MLP_Native_inr70985 for 16 epochs.
+
+Evaluating MLP_Native_inr70985:
+(epoch 15): mse_loss = 0.024203030159696937
+Finished training FKAN_Native_inr941449 for 16 epochs.
+
+Evaluating FKAN_Native_inr941449:
+(epoch 15): mse_loss = 0.026726607233285904
+Finished training FKAN_Native_inr430729 for 16 epochs.
+
+Evaluating FKAN_Native_inr430729:
+(epoch 15): mse_loss = 0.02928296593017876
+Finished training MLP_Native_inr233737 for 16 epochs.
+
+Evaluating MLP_Native_inr233737:
+(epoch 15): mse_loss = 0.0286599681712687
+Finished training FKAN_Native_inr663049 for 16 epochs.
+
+Evaluating FKAN_Native_inr663049:
+MLP_Native_inr595849 - Evaluation Results:
+PSNR: 15.13100814819336
+SSIM: 0.18457019329071045
+MSE: 0.030683089047670364
+---------------------------------------- 
+
+MLP_Native_inr551753 - Evaluation Results:
+PSNR: 16.452930450439453
+SSIM: 0.27778032422065735
+MSE: 0.02263116091489792
+---------------------------------------- 
+
+FKAN_Native_inr808777 - Evaluation Results:
+PSNR: 17.815412521362305
+SSIM: 0.197404146194458
+MSE: 0.016537073999643326
+---------------------------------------- 
+
+MLP_Native_inr70985 - Evaluation Results:
+PSNR: 17.299781799316406
+SSIM: 0.3252854347229004
+MSE: 0.01862180233001709
+---------------------------------------- 
+
+FKAN_Native_inr941449 - Evaluation Results:
+PSNR: 16.35281753540039
+SSIM: 0.21056225895881653
+MSE: 0.02315891906619072
+---------------------------------------- 
+
+FKAN_Native_inr430729 - Evaluation Results:
+PSNR: 15.830140113830566
+SSIM: 0.12423035502433777
+MSE: 0.02612076885998249
+---------------------------------------- 
+
+FKAN_Native_inr663049 - Evaluation Results:
+PSNR: 15.47246265411377
+SSIM: 0.10507374256849289
+MSE: 0.028363097459077835
+---------------------------------------- 
+
+MLP_Native_inr233737 - Evaluation Results:
+PSNR: 15.356127738952637
+SSIM: 0.18513762950897217
+MSE: 0.029133131727576256
+---------------------------------------- 
+
+Running benchmark for dataset: /grand/insitu/cohanlon/datasets/raw/test/mrt_angio_416x512x112_uint16.raw
+Training MLP_Native_inr64585 on mrt_angio_416x512x112_uint16
+Training MLP_Native_inr864649 on mrt_angio_416x512x112_uint16
+Training MLP_Native_inr42121 on mrt_angio_416x512x112_uint16
+Training MLP_Native_inr444041 on mrt_angio_416x512x112_uint16
+Training FKAN_Native_inr983689 on mrt_angio_416x512x112_uint16
+Training FKAN_Native_inr440073 on mrt_angio_416x512x112_uint16
+Training FKAN_Native_inr513929 on mrt_angio_416x512x112_uint16
+Training FKAN_Native_inr183497 on mrt_angio_416x512x112_uint16
+(epoch 0): mse_loss = 0.0012979662115557714
+(epoch 0): mse_loss = 0.002191086981578597
+(epoch 0): mse_loss = 0.01783523063532302
+(epoch 0): mse_loss = 0.0021094788453710563
+(epoch 0): mse_loss = 0.01780723828846681
+(epoch 0): mse_loss = 0.0093741786418672
+(epoch 0): mse_loss = 0.006743617076778549
+(epoch 0): mse_loss = 0.003989079307027898
+(epoch 1): mse_loss = 0.0012611784581427596
+(epoch 1): mse_loss = 0.0013382901489711622
+(epoch 1): mse_loss = 0.001544157684023318
+(epoch 1): mse_loss = 0.001137077852355695
+(epoch 1): mse_loss = 0.0016850507752598867
+(epoch 1): mse_loss = 0.0013181197992398067
+(epoch 1): mse_loss = 0.0014516729530481786
+(epoch 1): mse_loss = 0.001558076731021424
+(epoch 2): mse_loss = 0.0012334273756445886
+(epoch 2): mse_loss = 0.0012826514302415179
+(epoch 2): mse_loss = 0.001415185326010572
+(epoch 2): mse_loss = 0.0010809555115973946
+(epoch 2): mse_loss = 0.0012647455716812677
+(epoch 2): mse_loss = 0.0013222997873166965
+(epoch 2): mse_loss = 0.0012186423683178274
+(epoch 2): mse_loss = 0.0014361701226104971
+(epoch 3): mse_loss = 0.0012476726706654017
+(epoch 3): mse_loss = 0.0010435874735396661
+(epoch 3): mse_loss = 0.001395274071530746
+(epoch 3): mse_loss = 0.0012068407015828927
+(epoch 3): mse_loss = 0.0011577985767891711
+(epoch 3): mse_loss = 0.0012558748887066351
+(epoch 3): mse_loss = 0.0011785361299529202
+(epoch 3): mse_loss = 0.001366047782069942
+(epoch 4): mse_loss = 0.0010068474190660169
+(epoch 4): mse_loss = 0.0011925753353132897
+(epoch 4): mse_loss = 0.0013788228686310473
+(epoch 4): mse_loss = 0.0012267502929866928
+(epoch 4): mse_loss = 0.0011139948058241447
+(epoch 4): mse_loss = 0.0011526928599898264
+(epoch 4): mse_loss = 0.0012141079354038523
+(epoch 4): mse_loss = 0.0013140267452639578
+(epoch 5): mse_loss = 0.0009758844834133204
+(epoch 5): mse_loss = 0.0011837110849248326
+(epoch 5): mse_loss = 0.0013492108226093658
+(epoch 5): mse_loss = 0.001209120031549841
+(epoch 5): mse_loss = 0.0010845545774637875
+(epoch 5): mse_loss = 0.0011827319783381197
+(epoch 5): mse_loss = 0.0012738707300741225
+(epoch 5): mse_loss = 0.0011329632127724057
+(epoch 6): mse_loss = 0.0009501927097617127
+(epoch 6): mse_loss = 0.0011760179493269258
+(epoch 6): mse_loss = 0.0010636475885953437
+(epoch 6): mse_loss = 0.001191905347066215
+(epoch 6): mse_loss = 0.001337465372641448
+(epoch 6): mse_loss = 0.0011582959861978171
+(epoch 6): mse_loss = 0.0012493635267774052
+(epoch 6): mse_loss = 0.0011125456512672827
+(epoch 7): mse_loss = 0.0009300863304096121
+(epoch 7): mse_loss = 0.0011689876608235842
+(epoch 7): mse_loss = 0.0010360554390769852
+(epoch 7): mse_loss = 0.0011797639898569476
+(epoch 7): mse_loss = 0.0013340165632953458
+(epoch 7): mse_loss = 0.0012287507767553677
+(epoch 7): mse_loss = 0.0011389129732768716
+(epoch 7): mse_loss = 0.0010938031819922808
+(epoch 8): mse_loss = 0.000916095100714861
+(epoch 8): mse_loss = 0.001162489111136113
+(epoch 8): mse_loss = 0.0010158500750389226
+(epoch 8): mse_loss = 0.0013307323687323522
+(epoch 8): mse_loss = 0.001172866161361306
+(epoch 8): mse_loss = 0.0012132062203798362
+(epoch 8): mse_loss = 0.0011221783121812393
+(epoch 8): mse_loss = 0.0010737749870423903
+(epoch 9): mse_loss = 0.0011560327045946985
+(epoch 9): mse_loss = 0.0009900080669347636
+(epoch 9): mse_loss = 0.0009048455017414148
+(epoch 9): mse_loss = 0.00119863906305969
+(epoch 9): mse_loss = 0.0011676000575100041
+(epoch 9): mse_loss = 0.0013274856268013777
+(epoch 9): mse_loss = 0.0011052810414284877
+(epoch 9): mse_loss = 0.0010544080031360244
+(epoch 10): mse_loss = 0.0011483190829384622
+(epoch 10): mse_loss = 0.0009664938256469463
+(epoch 10): mse_loss = 0.0008957856704140655
+(epoch 10): mse_loss = 0.0011832261393115355
+(epoch 10): mse_loss = 0.0010900111534123584
+(epoch 10): mse_loss = 0.0011611711656019747
+(epoch 10): mse_loss = 0.0013237288603904546
+(epoch 10): mse_loss = 0.0010334130150782825
+(epoch 11): mse_loss = 0.0011412155869478299
+(epoch 11): mse_loss = 0.0009418297799689194
+(epoch 11): mse_loss = 0.001157756758582584
+(epoch 11): mse_loss = 0.0008863201263331255
+(epoch 11): mse_loss = 0.0010754569412201418
+(epoch 11): mse_loss = 0.0011533692672306283
+(epoch 11): mse_loss = 0.001319621169266731
+(epoch 11): mse_loss = 0.0010120757475046308
+(epoch 12): mse_loss = 0.0011355255723733886
+(epoch 12): mse_loss = 0.0009171557693472285
+(epoch 12): mse_loss = 0.0011425626407899371
+(epoch 12): mse_loss = 0.0008807694689744244
+(epoch 12): mse_loss = 0.0011470109082957996
+(epoch 12): mse_loss = 0.0010624158758718704
+(epoch 12): mse_loss = 0.00131605812514733
+(epoch 12): mse_loss = 0.000991457195106285
+(epoch 13): mse_loss = 0.0011291769270818414
+(epoch 13): mse_loss = 0.0008935366371348449
+(epoch 13): mse_loss = 0.001131884584038334
+(epoch 13): mse_loss = 0.0011421017330216633
+(epoch 13): mse_loss = 0.0010499917808664287
+(epoch 13): mse_loss = 0.0008742523346522281
+(epoch 13): mse_loss = 0.0013133683755218594
+(epoch 13): mse_loss = 0.0009710177801425344
+(epoch 14): mse_loss = 0.0008692610835378917
+(epoch 14): mse_loss = 0.0011231661980503475
+(epoch 14): mse_loss = 0.001122735500537821
+(epoch 14): mse_loss = 0.0010387447388723729
+(epoch 14): mse_loss = 0.0008680553569370154
+(epoch 14): mse_loss = 0.0011381834289980132
+(epoch 14): mse_loss = 0.0013115974264679947
+(epoch 14): mse_loss = 0.0009514866631854182
+(epoch 15): mse_loss = 0.000847118458445798
+Finished training FKAN_Native_inr983689 for 16 epochs.
+
+Evaluating FKAN_Native_inr983689:
+(epoch 15): mse_loss = 0.001114070806159781
+Finished training FKAN_Native_inr183497 for 16 epochs.
+
+Evaluating FKAN_Native_inr183497:
+(epoch 15): mse_loss = 0.001117599796878614
+Finished training MLP_Native_inr864649 for 16 epochs.
+
+Evaluating MLP_Native_inr864649:
+(epoch 15): mse_loss = 0.000862107916743428
+Finished training MLP_Native_inr64585 for 16 epochs.
+
+Evaluating MLP_Native_inr64585:
+(epoch 15): mse_loss = 0.001028894437195549
+Finished training FKAN_Native_inr513929 for 16 epochs.
+
+Evaluating FKAN_Native_inr513929:
+(epoch 15): mse_loss = 0.001135496214124282
+Finished training MLP_Native_inr42121 for 16 epochs.
+
+Evaluating MLP_Native_inr42121:
+(epoch 15): mse_loss = 0.0013097622375845765
+Finished training MLP_Native_inr444041 for 16 epochs.
+
+Evaluating MLP_Native_inr444041:
+(epoch 15): mse_loss = 0.0009341395828984218
+Finished training FKAN_Native_inr440073 for 16 epochs.
+
+Evaluating FKAN_Native_inr440073:
+FKAN_Native_inr183497 - Evaluation Results:
+PSNR: 29.518659591674805
+SSIM: 0.7098470330238342
+MSE: 0.0011172081576660275
+---------------------------------------- 
+
+FKAN_Native_inr513929 - Evaluation Results:
+PSNR: 29.890419006347656
+SSIM: 0.7114028334617615
+MSE: 0.0010255526285618544
+---------------------------------------- 
+
+MLP_Native_inr64585 - Evaluation Results:
+PSNR: 30.670063018798828
+SSIM: 0.736078143119812
+MSE: 0.0008570253266952932
+---------------------------------------- 
+
+MLP_Native_inr864649 - Evaluation Results:
+PSNR: 29.52751922607422
+SSIM: 0.7171997427940369
+MSE: 0.0011149307247251272
+---------------------------------------- 
+
+FKAN_Native_inr983689 - Evaluation Results:
+PSNR: 30.71613121032715
+SSIM: 0.718795120716095
+MSE: 0.0008479821844957769
+---------------------------------------- 
+
+MLP_Native_inr42121 - Evaluation Results:
+PSNR: 29.4558048248291
+SSIM: 0.7183037996292114
+MSE: 0.001133494428358972
+---------------------------------------- 
+
+MLP_Native_inr444041 - Evaluation Results:
+PSNR: 28.827842712402344
+SSIM: 0.699547529220581
+MSE: 0.001309832208789885
+---------------------------------------- 
+
+FKAN_Native_inr440073 - Evaluation Results:
+PSNR: 30.34629249572754
+SSIM: 0.7156705856323242
+MSE: 0.0009233590681105852
+---------------------------------------- 
+
+Running benchmark for dataset: /grand/insitu/cohanlon/datasets/raw/test/nucleon_41x41x41_uint8.raw
+Training MLP_Native_inr675529 on nucleon_41x41x41_uint8
+Training MLP_Native_inr643657 on nucleon_41x41x41_uint8
+Training MLP_Native_inr674377 on nucleon_41x41x41_uint8
+Training MLP_Native_inr66633 on nucleon_41x41x41_uint8
+Training FKAN_Native_inr472329 on nucleon_41x41x41_uint8
+Training FKAN_Native_inr826505 on nucleon_41x41x41_uint8
+(epoch 0): mse_loss = 0.0840703621506691
+(epoch 0): mse_loss = 0.06939150889714558
+(epoch 0): mse_loss = 0.06876027087370555
+Training FKAN_Native_inr407241 on nucleon_41x41x41_uint8
+(epoch 0): mse_loss = 0.08970463275909424
+Training FKAN_Native_inr784649 on nucleon_41x41x41_uint8
+(epoch 0): mse_loss = 0.56886754433314
+(epoch 0): mse_loss = 0.2231419781843821
+(epoch 1): mse_loss = 0.06098292643825213
+(epoch 1): mse_loss = 0.06176144629716873
+(epoch 1): mse_loss = 0.06365877389907837
+(epoch 0): mse_loss = 0.1543311377366384
+(epoch 1): mse_loss = 0.08268268158038457
+(epoch 0): mse_loss = 0.12326110154390335
+(epoch 1): mse_loss = 0.3798945943514506
+(epoch 1): mse_loss = 0.16911809146404266
+(epoch 2): mse_loss = 0.05628415197134018
+(epoch 2): mse_loss = 0.06016420697172483
+(epoch 2): mse_loss = 0.05418810248374939
+(epoch 1): mse_loss = 0.12697988748550415
+(epoch 2): mse_loss = 0.07705096652110417
+(epoch 1): mse_loss = 0.09678213795026143
+(epoch 2): mse_loss = 0.316927174727122
+(epoch 2): mse_loss = 0.1405522127946218
+(epoch 3): mse_loss = 0.05363204206029574
+(epoch 3): mse_loss = 0.05739890784025192
+(epoch 3): mse_loss = 0.05599238723516464
+(epoch 2): mse_loss = 0.11138628423213959
+(epoch 3): mse_loss = 0.07170328001181285
+(epoch 2): mse_loss = 0.08481920262177785
+(epoch 3): mse_loss = 0.26364260415236157
+(epoch 3): mse_loss = 0.11657207707564037
+(epoch 4): mse_loss = 0.05199397479494413
+(epoch 4): mse_loss = 0.054880515982707344
+(epoch 4): mse_loss = 0.05551715691884359
+(epoch 3): mse_loss = 0.10146105041106541
+(epoch 4): mse_loss = 0.0665295198559761
+(epoch 3): mse_loss = 0.07672784725824992
+(epoch 4): mse_loss = 0.23608209689458212
+(epoch 4): mse_loss = 0.09944303085406621
+(epoch 5): mse_loss = 0.05176011845469475
+(epoch 4): mse_loss = 0.09244622538487117
+(epoch 5): mse_loss = 0.05345697576800982
+(epoch 5): mse_loss = 0.052696442852417626
+(epoch 5): mse_loss = 0.06270260115464528
+(epoch 4): mse_loss = 0.06887106100718181
+(epoch 5): mse_loss = 0.20585798720518747
+(epoch 5): mse_loss = 0.08847162872552872
+(epoch 6): mse_loss = 0.051702251036961876
+(epoch 5): mse_loss = 0.0846967672308286
+(epoch 6): mse_loss = 0.05256237337986628
+(epoch 6): mse_loss = 0.051318502674500145
+(epoch 6): mse_loss = 0.05953059966365496
+(epoch 5): mse_loss = 0.06354294220606486
+(epoch 6): mse_loss = 0.1813992808262507
+(epoch 6): mse_loss = 0.07833365847667058
+(epoch 7): mse_loss = 0.052127473056316376
+(epoch 7): mse_loss = 0.0533993865052859
+(epoch 6): mse_loss = 0.07851601888736089
+(epoch 7): mse_loss = 0.05286817500988642
+(epoch 7): mse_loss = 0.058777532229820885
+(epoch 6): mse_loss = 0.05956831946969032
+(epoch 7): mse_loss = 0.16526988645394644
+(epoch 7): mse_loss = 0.07098352660735448
+(epoch 8): mse_loss = 0.05057495211561521
+(epoch 8): mse_loss = 0.05234125256538391
+(epoch 7): mse_loss = 0.07338142891724904
+(epoch 8): mse_loss = 0.05169395978252093
+(epoch 8): mse_loss = 0.05571968232591947
+(epoch 7): mse_loss = 0.05759710073471069
+(epoch 8): mse_loss = 0.14558236300945282
+(epoch 8): mse_loss = 0.06284479424357414
+(epoch 9): mse_loss = 0.049460643281539284
+(epoch 9): mse_loss = 0.05194649597009023
+(epoch 8): mse_loss = 0.06857480108737946
+(epoch 9): mse_loss = 0.05025497327248255
+(epoch 9): mse_loss = 0.0538826584815979
+(epoch 8): mse_loss = 0.05372597152988116
+(epoch 9): mse_loss = 0.13174201051394144
+(epoch 9): mse_loss = 0.05671031400561333
+(epoch 10): mse_loss = 0.051601762572924294
+(epoch 10): mse_loss = 0.0483699602385362
+(epoch 9): mse_loss = 0.06439659744501114
+(epoch 10): mse_loss = 0.04891348381837209
+(epoch 10): mse_loss = 0.05243952323993047
+(epoch 9): mse_loss = 0.05099471906820933
+(epoch 10): mse_loss = 0.117411603530248
+(epoch 10): mse_loss = 0.05124019583066305
+(epoch 11): mse_loss = 0.052139958987633385
+(epoch 11): mse_loss = 0.04845776284734408
+(epoch 10): mse_loss = 0.06074430917700132
+(epoch 11): mse_loss = 0.04880807176232338
+(epoch 11): mse_loss = 0.05269170179963112
+(epoch 10): mse_loss = 0.04905858263373375
+(epoch 11): mse_loss = 0.10718390345573425
+(epoch 11): mse_loss = 0.04676011577248573
+(epoch 12): mse_loss = 0.05235709249973297
+(epoch 12): mse_loss = 0.048094826440016426
+(epoch 11): mse_loss = 0.05737226580580076
+(epoch 12): mse_loss = 0.04840836922327677
+(epoch 12): mse_loss = 0.05276346951723099
+(epoch 11): mse_loss = 0.04770457992951075
+(epoch 12): mse_loss = 0.10124302407105763
+(epoch 12): mse_loss = 0.04295132433374723
+(epoch 13): mse_loss = 0.051522012799978256
+(epoch 13): mse_loss = 0.0465170219540596
+(epoch 12): mse_loss = 0.0548793189227581
+(epoch 13): mse_loss = 0.04669057950377464
+(epoch 13): mse_loss = 0.051843048383792244
+(epoch 13): mse_loss = 0.09245001524686813
+(epoch 12): mse_loss = 0.04596581310033798
+(epoch 13): mse_loss = 0.03970756009221077
+(epoch 14): mse_loss = 0.05154788618286451
+(epoch 13): mse_loss = 0.05201215917865435
+(epoch 14): mse_loss = 0.04587033639351527
+(epoch 14): mse_loss = 0.04568718373775482
+(epoch 14): mse_loss = 0.05200611179073652
+(epoch 14): mse_loss = 0.0842268094420433
+(epoch 13): mse_loss = 0.04489897439877192
+(epoch 14): mse_loss = 0.03741274029016495
+(epoch 15): mse_loss = 0.050971208761135735
+Finished training MLP_Native_inr674377 for 16 epochs.
+
+Evaluating MLP_Native_inr674377:
+(epoch 15): mse_loss = 0.04453025385737419
+Finished training MLP_Native_inr675529 for 16 epochs.
+
+Evaluating MLP_Native_inr675529:
+(epoch 15): mse_loss = 0.04394201189279556
+Finished training MLP_Native_inr643657 for 16 epochs.
+
+Evaluating MLP_Native_inr643657:
+(epoch 14): mse_loss = 0.04961661001046499
+(epoch 15): mse_loss = 0.051624140391747154
+Finished training MLP_Native_inr66633 for 16 epochs.
+
+Evaluating MLP_Native_inr66633:
+(epoch 15): mse_loss = 0.07943432529767354
+Finished training FKAN_Native_inr472329 for 16 epochs.
+
+Evaluating FKAN_Native_inr472329:
+(epoch 14): mse_loss = 0.04363059004147848
+(epoch 15): mse_loss = 0.03459348653753599
+Finished training FKAN_Native_inr826505 for 16 epochs.
+
+Evaluating FKAN_Native_inr826505:
+(epoch 15): mse_loss = 0.046769833813110985
+Finished training FKAN_Native_inr407241 for 16 epochs.
+
+Evaluating FKAN_Native_inr407241:
+MLP_Native_inr674377 - Evaluation Results:
+PSNR: 12.835064888000488
+SSIM: 0.10834653675556183
+MSE: 0.052058711647987366
+---------------------------------------- 
+
+MLP_Native_inr675529 - Evaluation Results:
+PSNR: 13.43208122253418
+SSIM: 0.1456369310617447
+MSE: 0.04537239670753479
+---------------------------------------- 
+
+MLP_Native_inr643657 - Evaluation Results:
+PSNR: 13.523029327392578
+SSIM: 0.15697059035301208
+MSE: 0.04443212226033211
+---------------------------------------- 
+
+(epoch 15): mse_loss = 0.0420494961241881
+Finished training FKAN_Native_inr784649 for 16 epochs.
+
+Evaluating FKAN_Native_inr784649:
+MLP_Native_inr66633 - Evaluation Results:
+PSNR: 12.776256561279297
+SSIM: 0.10137663781642914
+MSE: 0.052768442779779434
+---------------------------------------- 
+
+FKAN_Native_inr472329 - Evaluation Results:
+PSNR: 11.274506568908691
+SSIM: 0.11728612333536148
+MSE: 0.07456743717193604
+---------------------------------------- 
+
+FKAN_Native_inr826505 - Evaluation Results:
+PSNR: 14.529778480529785
+SSIM: 0.16039513051509857
+MSE: 0.035238880664110184
+---------------------------------------- 
+
+FKAN_Native_inr407241 - Evaluation Results:
+PSNR: 13.247517585754395
+SSIM: 0.09990916401147842
+MSE: 0.04734216630458832
+---------------------------------------- 
+
+FKAN_Native_inr784649 - Evaluation Results:
+PSNR: 13.641535758972168
+SSIM: 0.1069192886352539
+MSE: 0.043236080557107925
+---------------------------------------- 
+
+Running benchmark for dataset: /grand/insitu/cohanlon/datasets/raw/test/pawpawsaurus_958x646x1088_uint16.raw
+Training MLP_Native_inr271305 on pawpawsaurus_958x646x1088_uint16
+Training MLP_Native_inr268553 on pawpawsaurus_958x646x1088_uint16
+Training MLP_Native_inr337289 on pawpawsaurus_958x646x1088_uint16
+Training MLP_Native_inr286409 on pawpawsaurus_958x646x1088_uint16
+Training FKAN_Native_inr695881 on pawpawsaurus_958x646x1088_uint16
+Training FKAN_Native_inr593737 on pawpawsaurus_958x646x1088_uint16
+Training FKAN_Native_inr665289 on pawpawsaurus_958x646x1088_uint16
+Training FKAN_Native_inr694985 on pawpawsaurus_958x646x1088_uint16
+(epoch 0): mse_loss = 0.005401061681202163
+(epoch 0): mse_loss = 0.00835624030130473
+(epoch 0): mse_loss = 0.0039047987184037823
+(epoch 0): mse_loss = 0.0064233837902485744
+(epoch 0): mse_loss = 0.003972963968707844
+(epoch 0): mse_loss = 0.007807891047578941
+(epoch 0): mse_loss = 0.004958658849888387
+(epoch 0): mse_loss = 0.004934710148263093
+(epoch 1): mse_loss = 0.0036655603749715156
+(epoch 1): mse_loss = 0.0012048818942008855
+(epoch 1): mse_loss = 0.006627724413118745
+(epoch 1): mse_loss = 0.007226450321785723
+(epoch 1): mse_loss = 0.0018875411920635788
+(epoch 1): mse_loss = 0.003481770406914828
+(epoch 1): mse_loss = 0.002481353649019501
+(epoch 1): mse_loss = 0.00486361216780008
+(epoch 2): mse_loss = 0.0031556279303188673
+(epoch 2): mse_loss = 0.0010081375744710691
+(epoch 2): mse_loss = 0.007074493781369201
+(epoch 2): mse_loss = 0.006413592999925494
+(epoch 2): mse_loss = 0.0016118751099680152
+(epoch 2): mse_loss = 0.0032540338647548345
+(epoch 2): mse_loss = 0.004523539080690304
+(epoch 2): mse_loss = 0.002099123403084042
+(epoch 3): mse_loss = 0.0009067614616550075
+(epoch 3): mse_loss = 0.0029209171333062674
+(epoch 3): mse_loss = 0.0062998232120438005
+(epoch 3): mse_loss = 0.006979917125579078
+(epoch 3): mse_loss = 0.0014430887733172207
+(epoch 3): mse_loss = 0.0031027134994743855
+(epoch 3): mse_loss = 0.0019169808966544798
+(epoch 3): mse_loss = 0.004287559537357428
+(epoch 4): mse_loss = 0.0027949270798129353
+(epoch 4): mse_loss = 0.0008415711094180277
+(epoch 4): mse_loss = 0.0068219432189333285
+(epoch 4): mse_loss = 0.0013276571440942598
+(epoch 4): mse_loss = 0.0061971607993164405
+(epoch 4): mse_loss = 0.001794433344196657
+(epoch 4): mse_loss = 0.002987834460461108
+(epoch 4): mse_loss = 0.004129634490169563
+(epoch 5): mse_loss = 0.0027104594807943498
+(epoch 5): mse_loss = 0.0007936007740559615
+(epoch 5): mse_loss = 0.0067257137625005995
+(epoch 5): mse_loss = 0.0012399623734709094
+(epoch 5): mse_loss = 0.006094335434711153
+(epoch 5): mse_loss = 0.0016920241365165078
+(epoch 5): mse_loss = 0.00401665639376819
+(epoch 5): mse_loss = 0.0029404219486162154
+(epoch 6): mse_loss = 0.002635045094396329
+(epoch 6): mse_loss = 0.0007573538558214587
+(epoch 6): mse_loss = 0.00670923629948411
+(epoch 6): mse_loss = 0.0011721281095854008
+(epoch 6): mse_loss = 0.001637437871755978
+(epoch 6): mse_loss = 0.005984424756361905
+(epoch 6): mse_loss = 0.003959698805293992
+(epoch 6): mse_loss = 0.00292113273736024
+(epoch 7): mse_loss = 0.0007279631884726365
+(epoch 7): mse_loss = 0.0025756694154277365
+(epoch 7): mse_loss = 0.0066920157175340165
+(epoch 7): mse_loss = 0.001120140947001398
+(epoch 7): mse_loss = 0.0015966905652146513
+(epoch 7): mse_loss = 0.005951643175320816
+(epoch 7): mse_loss = 0.003914187575579727
+(epoch 7): mse_loss = 0.00290039139037457
+(epoch 8): mse_loss = 0.0007044045102068136
+(epoch 8): mse_loss = 0.0025215465177642424
+(epoch 8): mse_loss = 0.0010821313810649394
+(epoch 8): mse_loss = 0.0015604510597819936
+(epoch 8): mse_loss = 0.006625514827626789
+(epoch 8): mse_loss = 0.005928352588856655
+(epoch 8): mse_loss = 0.0028788476987820794
+(epoch 8): mse_loss = 0.0038831001585438725
+(epoch 9): mse_loss = 0.000684255883835718
+(epoch 9): mse_loss = 0.0024766997416455277
+(epoch 9): mse_loss = 0.0010496401229483621
+(epoch 9): mse_loss = 0.0015274883234190682
+(epoch 9): mse_loss = 0.006581797031968973
+(epoch 9): mse_loss = 0.005910466118902475
+(epoch 9): mse_loss = 0.0028540411366895693
+(epoch 9): mse_loss = 0.0038610118472737196
