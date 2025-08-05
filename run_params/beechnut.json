@@ -1,0 +1,55 @@
+{
+    "beechnut": [
+        {
+            "lrate": 0.01,
+            "lrate_decay": 18,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 1.1,
+            "log2_hashmap_size": [
+                9,
+                10
+            ],
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "zfp_enc": 0.02,
+            "zfp_mlp": 0.01
+        },
+        {
+            "lrate": 0.01,
+            "lrate_decay": 18,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 2,
+            "n_features_per_level": 8,
+            "per_level_scale": 1.1,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": [
+                10,
+                17
+            ],
+            "zfp_enc": 0.02,
+            "zfp_mlp": 0.01
+        },
+        {
+            "lrate": 0.001,
+            "lrate_decay": 16,
+            "epochs": 20,
+            "n_neurons": 32,
+            "n_hidden_layers": 4,
+            "n_levels": 4,
+            "n_features_per_level": 8,
+            "per_level_scale": 2.0,
+            "base_resolution": 16,
+            "log2_hashmap_size": [
+                18,
+                19
+            ],
+            "zfp_enc": 0.004,
+            "zfp_mlp": 0.002
+        }
+    ]
+}

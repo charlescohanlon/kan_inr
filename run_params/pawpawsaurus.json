@@ -1,0 +1,80 @@
+{
+    "pawpawsaurus": [
+        {
+            "lrate": 0.01,
+            "lrate_decay": 32,
+            "epochs": 32,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": [
+                8,
+                12
+            ],
+            "zfp_enc": 0.016,
+            "zfp_mlp": 0.008
+        },
+        {
+            "lrate": 0.01,
+            "lrate_decay": 30,
+            "epochs": 30,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": [
+                13,
+                17
+            ],
+            "zfp_enc": 0.012,
+            "zfp_mlp": 0.006
+        },
+        {
+            "lrate": 0.01,
+            "lrate_decay": 20,
+            "epochs": 28,
+            "n_neurons": 16,
+            "n_hidden_layers": 2,
+            "n_levels": 2,
+            "n_features_per_level": 4,
+            "per_level_scale": 1.1,
+            "base_resolution": 53,
+            "log2_hashmap_size": 18,
+            "zfp_enc": 0.010,
+            "zfp_mlp": 0.006
+        },
+        {
+            "lrate": 0.01,
+            "lrate_decay": 20,
+            "epochs": 28,
+            "n_neurons": 16,
+            "n_hidden_layers": 2,
+            "n_levels": 3,
+            "n_features_per_level": 4,
+            "per_level_scale": 1.1,
+            "base_resolution": 67,
+            "log2_hashmap_size": 19,
+            "zfp_enc": 0.008,
+            "zfp_mlp": 0.004
+        },
+        {
+            "lrate": 0.01,
+            "lrate_decay": 20,
+            "epochs": 28,
+            "n_neurons": 16,
+            "n_hidden_layers": 2,
+            "n_levels": 3,
+            "n_features_per_level": 4,
+            "per_level_scale": 1.1,
+            "base_resolution": 84,
+            "log2_hashmap_size": 20,
+            "zfp_enc": 0.008,
+            "zfp_mlp": 0.004
+        }
+    ]
+}
