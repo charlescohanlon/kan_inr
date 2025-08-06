@@ -19,6 +19,7 @@ from torchmetrics.functional import (
     structural_similarity_index_measure,
 )
 
+
 from einops import rearrange
 import os
 
@@ -43,14 +44,15 @@ class BenchmarkConfig:
     output_filename: Optional[str] = None
     enable_pbar: bool = True
     shuffle: bool = True
-    num_workers: int = 0
+    num_workers: int | str = 0  # Can be 'num_cpus' to use all available CPUs
     pin_memory: bool = True
     run_dtype: str = "float32"  # Data type for all computations
     loss_fn: str = "MSE"
-    save_model: bool = True
     repeats: int = 1  # Number of times to repeat each run for averaging results
     prefetch_factor: int = 2  # Prefetch factor for DataLoader workers
     only_count_runs: bool = False  # If True, only count runs without executing them
+    save_model: bool = False  # TODO: implement these
+    save_reconstruction: bool = False
 
 
 @dataclass
@@ -109,7 +111,9 @@ def main(cfg: BenchmarkConfig):
     if cfg.output_filename is None:
         # Create a unique filename based on the parameter sweeping
         unique_filename = (
-            "_".join([params.dataset_name, params.model_type, str(params.log2_hashmap_size)])
+            "_".join(
+                [params.dataset_name, params.model_type, str(params.log2_hashmap_size)]
+            )
             + "_results.csv"
         )
         output_path = output_dir / unique_filename
@@ -174,6 +178,10 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
 def run_benchmark(
     data_path: Path, output_path: Path, params: RunParams, cfg: BenchmarkConfig
 ):
+    # Set device and dtype
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    run_dtype = getattr(torch, cfg.run_dtype)
+
     # Create dataset
     dataset_info = data_path.stem.split("_")
     # richtmyer_meshkov_2048x2048x1920_uint8 -> richtmyer_meshkov, (2048, 2048, 1920), np.uint8
@@ -188,19 +196,18 @@ def run_benchmark(
         normalize_values=True,
         return_coords=False,
         order="F",  # col major order
+        batch_size=cfg.batch_size,
+        initial_shuffle=cfg.shuffle,
     )
 
-    # Set device and dtype
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    run_dtype = getattr(torch, cfg.run_dtype)
-    native_encoder = device.type == "cpu"
     # use native encoder (i.e., don't use TCNN) for KAN
+    native_encoder = device.type == "cpu"
     native_network = device.type == "cpu" or params.model_type != "mlp"
 
     cum_psnr, cum_ssim, cum_mse = 0.0, 0.0, 0.0
     num_repeats = cfg.repeats
     for repeat in range(num_repeats):
-        print(f"Running repeat {repeat + 1}/{num_repeats} for {params}")
+        print(f"Running repeat {repeat + 1}/{num_repeats}")
 
         # Create model and optimizer stuff
         model = INR_Base(
@@ -208,7 +215,7 @@ def run_benchmark(
             n_output_dims=1,
             native_encoder=native_encoder,
             native_network=native_network,
-            network=params.model_type,
+            network_type=params.model_type,
             n_hidden_layers=params.n_hidden_layers,
             n_neurons=params.n_neurons,
             n_levels=params.n_levels,
@@ -225,17 +232,18 @@ def run_benchmark(
             raise ValueError(f"Unsupported loss function: {cfg.loss_fn}")
         loss_fn = nn.MSELoss()
         pin = device.type == "cuda" and cfg.pin_memory
+        num_workers = (
+            cfg.num_workers if isinstance(cfg.num_workers, int) else os.cpu_count()
+        )
         dataloader = DataLoader(
             dataset,
-            batch_size=cfg.batch_size,
-            shuffle=cfg.shuffle,
-            num_workers=cfg.num_workers,
+            num_workers=num_workers,
             pin_memory=pin,
-            prefetch_factor=None if cfg.num_workers == 0 else cfg.prefetch_factor,
-            persistent_workers=cfg.num_workers > 0,
+            prefetch_factor=None if num_workers == 0 else cfg.prefetch_factor,
+            persistent_workers=num_workers > 0,
         )
 
-        # Fit INR
+        print("Training INR...")
         model.train()
         for epoch in range(params.epochs):
             total_batch_loss = 0
@@ -254,7 +262,7 @@ def run_benchmark(
             avg_loss = total_batch_loss / len(dataloader)
             print(f"(epoch {epoch}): {loss_fn.__name__} = {avg_loss}")
 
-        # Evaluate INR
+        print("Evaluating INR...")
         with torch.no_grad():
             model.eval()
             dataloader.dataset.return_coords = False
@@ -288,10 +296,7 @@ def run_benchmark(
     avg_psnr = cum_psnr / num_repeats
     avg_ssim = cum_ssim / num_repeats
     avg_mse = cum_mse / num_repeats
-    print(
-        f"Average PSNR: {avg_psnr}, SSIM: {avg_ssim}, MSE: {avg_mse} "
-        f"over {num_repeats} repeats for {params}"
-    )
+    print(f"\tPSNR: {avg_psnr}\n\tSSIM: {avg_ssim}\n\tMSE: {avg_mse}")
 
     # Compute compression ratio
     with TemporaryDirectory() as tmpdir:

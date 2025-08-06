@@ -3,14 +3,18 @@ defaults:
   - _self_             # then fill in the rest of the args with below
 
 home_dir: "/grand/insitu/cohanlon"
+
+# relative to home directory
 params_file: "alcf_kan_inr/params.json"
 data_path: "datasets/raw"
-num_workers: 0    # num_processes_used = # gpus available x (1 + num_workers)
+
+num_workers: num_cpus
 save_model: False
-enable_pbar: False    # progress bar written to error on PBS
+save_reconstruction: False
+enable_pbar: False    # progress bar is written to error file on PBS
 
 # Model(s) to benchmark
-model_types: ["mlp", "kan"]
+model_types: ["kan", "mlp"]
 
 # Training
 batch_size: 32768
