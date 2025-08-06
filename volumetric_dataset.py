@@ -1,53 +1,60 @@
+from typing import Tuple, List
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from pathlib import Path
 
 
 class VolumetricDataset(Dataset):
     def __init__(
         self,
-        file_path,
-        data_shape,
-        data_type,
-        normalize_coords=True,
-        normalize_values=True,
-        return_coords=False,
-        order="F",  # col major order
+        file_path: Path,
+        data_shape: Tuple[int, int, int],
+        data_type: np.dtype,
+        normalize_coords: bool = True,
+        normalize_values: bool = True,
+        return_coords: bool = False,
+        order: str = "F",  # col major order
     ):
         self.data = np.fromfile(file_path, dtype=data_type)
-        if self.data.size != np.prod(data_shape):
-            raise ValueError("Data shape does not match file size")
-        self.data_shape = data_shape
-        self.normalize_indices = normalize_coords
-        self.normalize_values = normalize_values
         self.data_range = (np.min(self.data), np.max(self.data))
-        if self.normalize_values:
-            min, max = self.data_range
-            self.data = (self.data - min) / (max - min)
-        self.return_indices = return_coords
+
+        if normalize_coords:
+            xs = np.linspace(0, 1, data_shape[0])
+            ys = np.linspace(0, 1, data_shape[1])
+            zs = np.linspace(0, 1, data_shape[2])
+        else:
+            xs = np.arange(data_shape[0])
+            ys = np.arange(data_shape[1])
+            zs = np.arange(data_shape[2])
+        self.coords = np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1).reshape(
+            -1, 3
+        )
+
+        self.file_path = file_path
+        self.data_shape = data_shape
+        self.data_type = data_type
+        self.normalize_coords = normalize_coords
+        self.normalize_values = normalize_values
+        self.return_coords = return_coords
         self.order = order
 
-    def __getitem__(self, index):
-        # NOTE: NRRD004 files axis order is (left to right) fastest to slowest (column-major order)
-        # see https://teem.sourceforge.net/nrrd/format.html#general.4
-        d1, d2, d3 = self.data_shape
-        i = index % d1
-        j = (index // d1) % d2
-        k = index // (d1 * d2)
-        if self.return_indices:
-            indices = (i, j, k)
-        if self.normalize_indices:
-            i = i / (d1 - 1)
-            j = j / (d2 - 1)
-            k = k / (d3 - 1)
-        x = torch.tensor((i, j, k))
-        y = torch.tensor(self.data[index])[None]
-        if self.return_indices:
-            return x, y, indices
-        return x, y
+        if normalize_values:
+            min, max = self.data_range
+            self.data = (self.data - min) / (max - min)
+
+    def __getitem__(self, idx):
+        pair = (self.coords[idx], self.data[idx])
+        if self.return_coords:
+            if self.normalize_coords:  # denormalize coords
+                denorm_coords = self.coords[idx] * np.array(self.data_shape)
+                denorm_coords = denorm_coords.astype(np.int64)
+                return pair, denorm_coords
+        return pair
 
     def __len__(self):
-        return len(self.data)
+        return self.data.shape[0]
 
     def volume_data(self):
+        """Return the volume data in the original shape."""
         return self.data.reshape(self.data_shape, order=self.order)
