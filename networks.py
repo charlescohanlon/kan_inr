@@ -1,15 +1,133 @@
-from functools import partial
 import os, math
 from typing import Tuple
+import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
-
-import warnings
 from fastkan import FastKAN
+
+
+if torch.cuda.is_available():
+    import tinycudann
+    from tinycudann.modules import _C as _native
+    from tinycudann.modules import _torch_precision, _module_function
+
+    class EncodingFunction(nn.Module):
+        def __init__(self, n_input_dims, encoding_config, dtype=None):
+            super(EncodingFunction, self).__init__()
+
+            self.n_input_dims = n_input_dims
+            self.encoding_config = encoding_config
+
+            self._create_native_tcnn_module(dtype)
+
+            self.dtype = _torch_precision(self.native_tcnn_module.param_precision())
+            self.loss_scale = (
+                128.0
+                if self.native_tcnn_module.param_precision() == _native.Precision.Fp16
+                else 1.0
+            )
+
+            self.n_output_dims = self.native_tcnn_module.n_output_dims()
+
+        def _create_native_tcnn_module(self, dtype):
+            if dtype is None:
+                precision = _native.preferred_precision()
+            else:
+                if dtype == torch.float32:
+                    precision = _native.Precision.Fp32
+                elif dtype == torch.float16:
+                    precision = _native.Precision.Fp16
+                else:
+                    raise ValueError(
+                        f"Encoding only supports fp32 or fp16 precision, but got {dtype}"
+                    )
+            self.native_tcnn_module = _native.create_encoding(
+                self.n_input_dims, self.encoding_config, precision
+            )
+
+        def initial_params(self, seed=1337):
+            return self.native_tcnn_module.initial_params(seed)
+
+        def n_params(self):
+            return self.native_tcnn_module.n_params()
+
+        def forward(self, x, params):
+            if not x.is_cuda:
+                warnings.warn(
+                    "input must be a CUDA tensor, but isn't. This indicates suboptimal performance."
+                )
+                x = x.cuda()
+
+            batch_size = x.shape[0]
+            batch_size_granularity = int(_native.batch_size_granularity())
+            padded_batch_size = (
+                (batch_size + batch_size_granularity - 1)
+                // batch_size_granularity
+                * batch_size_granularity
+            )
+
+            x_padded = (
+                x
+                if batch_size == padded_batch_size
+                else torch.nn.functional.pad(
+                    x, [0, 0, 0, padded_batch_size - batch_size]
+                )
+            )
+            output = _module_function.apply(
+                self.native_tcnn_module,
+                x_padded.to(torch.float).contiguous(),
+                params.to(
+                    _torch_precision(self.native_tcnn_module.param_precision())
+                ).contiguous(),
+                self.loss_scale,
+            )
+            return output[:batch_size, : self.n_output_dims]
+
+
+class HashEmbedderTCNN(nn.Module):
+    def __init__(
+        self,
+        n_pos_dims=3,
+        seed=1337,
+        # encoder parameters
+        n_levels=16,
+        n_features_per_level=2,
+        log2_hashmap_size=19,
+        base_resolution=16,
+        per_level_scale=2.0,
+    ):
+        super(HashEmbedderTCNN, self).__init__()
+
+        self.n_pos_dims = n_pos_dims
+
+        encoding_config = {
+            "otype": "HashGrid",
+            "n_levels": n_levels,
+            "n_features_per_level": n_features_per_level,
+            "log2_hashmap_size": log2_hashmap_size,
+            "base_resolution": base_resolution,
+            "per_level_scale": per_level_scale,
+        }
+
+        self.encoding_config = encoding_config
+
+        self.n_levels = n_levels
+        self.n_features_per_level = n_features_per_level
+        self.log2_hashmap_size = log2_hashmap_size
+        self.base_resolution = base_resolution
+        self.per_level_scale = per_level_scale
+
+        self.embeddings = tinycudann.Encoding(
+            n_input_dims=self.n_pos_dims, encoding_config=encoding_config, seed=seed
+        )
+        self.n_output_dims = self.embeddings.n_output_dims
+
+    def forward(self, x):
+        return self.embeddings(x)
 
 
 class HashEmbedderNative(nn.Module):
@@ -175,6 +293,15 @@ class HashEmbedderNative(nn.Module):
         return f"hyperparams={self.encoding_config}"
 
 
+def find_activation(activation):
+    if activation == "None":
+        return lambda x: x
+    if activation == "ReLU":
+        return lambda x: F.relu(x, inplace=True)
+    elif activation == "Sigmoid":
+        return F.sigmoid
+
+
 MLP_ALIGNMENT = 16
 
 
@@ -224,20 +351,187 @@ class MLP_Native(torch.nn.Module):
             bias=self.bias,
         )
 
-        if activation == "ReLU":
-            self.activation = F.relu
-        elif activation == "Sigmoid":
-            self.activation = F.sigmoid
-        elif activation == "SiLU":
-            self.activation = F.silu
-        else:
-            raise NotImplementedError(f"Unknown activation {activation}")
+        self.activation = find_activation(activation)
+        self.output_activation = find_activation(output_activation)
 
     def forward(self, x):
         x = self.activation(self.first(x))
         for layer in self.hidden:
             x = self.activation(layer(x))
-        return self.last(x)[..., : self.n_output_dims]
+        return self.output_activation(self.last(x))[..., : self.n_output_dims]
+
+
+class MLP_TCNN(torch.nn.Module):
+    def __init__(
+        self,
+        n_input_dims=3,
+        n_output_dims=1,
+        bias=False,
+        seed=1337,
+        n_hidden_layers=3,
+        n_neurons=64,
+        activation="ReLU",
+        output_activation="None",
+    ):
+        super(MLP_TCNN, self).__init__()
+
+        self.n_input_dims = n_input_dims
+        self.n_output_dims = n_output_dims
+
+        network_config = {
+            "otype": "FullyFusedMLP",
+            "activation": activation,
+            "output_activation": output_activation,
+            "n_neurons": n_neurons,
+            "n_hidden_layers": n_hidden_layers,
+            "feedback_alignment": False,
+        }
+
+        self.n_hidden_layers = n_hidden_layers
+        self.n_neurons = n_neurons
+        self.bias = False
+
+        self.network_config = network_config
+
+        assert bias == False, "TCNN MLP doesnot contain bias"
+
+        self.model = tinycudann.Network(
+            n_input_dims=self.n_input_dims,
+            n_output_dims=self.n_output_dims,
+            network_config=network_config,
+            seed=seed,
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+
+class INR_Base(nn.Module):
+    def __init__(
+        self,
+        n_input_dims=3,
+        n_output_dims=1,
+        native_encoder=True,
+        native_network=True,
+        network_type="mlp",
+        # network paramerers
+        n_hidden_layers=3,
+        n_neurons=64,
+        # encoder paraparametersms
+        n_levels=16,
+        n_features_per_level=4,
+        log2_hashmap_size=19,
+        base_resolution=16,
+        per_level_scale=2.0,
+        activation="ReLU",
+        output_activation="None",
+    ):
+        super(INR_Base, self).__init__()
+
+        self.n_input_dims = n_input_dims
+        self.n_output_dims = n_output_dims
+
+        ENCODER = HashEmbedderNative if native_encoder else HashEmbedderTCNN
+        if network_type.lower() == "mlp":
+            NETWORK = MLP_Native if native_network else MLP_TCNN
+        elif network_type.lower() == "kan":
+            NETWORK = FKAN_Native
+        else:
+            raise ValueError(f"Unsupported network type {network_type}")
+
+        # Make sure memory accesses will be aligned
+        n_enc_out = n_levels * n_features_per_level
+        n_enc_pad = (n_enc_out + MLP_ALIGNMENT - 1) // MLP_ALIGNMENT * MLP_ALIGNMENT
+        self.n_pad = n_enc_pad - n_enc_out
+
+        self.network = NETWORK(
+            n_input_dims=n_enc_pad,
+            n_output_dims=n_output_dims,
+            n_hidden_layers=n_hidden_layers,
+            n_neurons=n_neurons,
+            activation=activation,
+            output_activation=output_activation,
+        )
+
+        self.encoder = ENCODER(
+            n_pos_dims=n_input_dims,
+            n_levels=n_levels,
+            n_features_per_level=n_features_per_level,
+            log2_hashmap_size=log2_hashmap_size,
+            base_resolution=base_resolution,
+            per_level_scale=per_level_scale,
+        )
+
+        self.encoding_config = self.encoder.encoding_config
+        self.network_config = self.network.network_config
+
+    def forward(self, x):
+        h = self.encoder(x)
+        h = F.pad(h, (0, self.n_pad))
+        return self.network(h)
+
+
+class INR_TCNN(nn.Module):
+    def __init__(
+        self,
+        n_input_dims=3,
+        n_output_dims=1,
+        seed=1337,
+        # network paramerers
+        n_hidden_layers=3,
+        n_neurons=64,
+        # encoder paraparametersms
+        n_levels=16,
+        n_features_per_level=4,
+        log2_hashmap_size=19,
+        base_resolution=16,
+        per_level_scale=2.0,
+        activation="ReLU",
+        output_activation="None",
+    ):
+        super(INR_TCNN, self).__init__()
+
+        self.n_input_dims = n_input_dims
+        self.n_output_dims = n_output_dims
+
+        encoding_config = {
+            "otype": "HashGrid",
+            "n_levels": n_levels,
+            "n_features_per_level": n_features_per_level,
+            "log2_hashmap_size": log2_hashmap_size,
+            "base_resolution": base_resolution,
+            "per_level_scale": per_level_scale,
+        }
+
+        network_config = {
+            "otype": "FullyFusedMLP",
+            "activation": activation,
+            "output_activation": output_activation,
+            "n_neurons": n_neurons,
+            "n_hidden_layers": n_hidden_layers,
+            "feedback_alignment": False,
+        }
+
+        self.encoding_config = encoding_config
+        self.network_config = network_config
+
+        self.model = tinycudann.NetworkWithInputEncoding(
+            n_input_dims=n_input_dims,
+            n_output_dims=n_output_dims,
+            encoding_config=encoding_config,
+            network_config=network_config,
+            seed=seed,
+        )
+
+        self.encoding_func = EncodingFunction(
+            n_input_dims=n_input_dims, encoding_config=encoding_config
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
+    def n_encoding_params(self):
+        return self.encoding_func.n_params()
 
 
 class FKAN_Native(torch.nn.Module):
@@ -284,71 +578,6 @@ class FKAN_Native(torch.nn.Module):
 
     def forward(self, x):
         return self.fkan(x)
-
-
-class INR_Base(nn.Module):
-    def __init__(
-        self,
-        n_input_dims=3,
-        n_output_dims=1,
-        native_encoder=True,
-        network="mlp",
-        # network paramerers
-        n_hidden_layers=3,
-        n_neurons=64,
-        # encoder paraparametersms
-        n_levels=16,
-        n_features_per_level=4,
-        log2_hashmap_size=19,
-        base_resolution=16,
-        per_level_scale=2.0,
-        activation="ReLU",
-        output_activation="None",
-    ):
-        super(INR_Base, self).__init__()
-
-        self.n_input_dims = n_input_dims
-        self.n_output_dims = n_output_dims
-
-        ENCODER = HashEmbedderNative  # if native_encoder else HashEmbedderTCNN
-        if network == "mlp":
-            NETWORK = MLP_Native  # if native_network else MLP_TCNN
-        elif network.lower() in ["fast-kan", "f-kan"]:
-            NETWORK = FKAN_Native
-        else:
-            raise NotImplementedError(f"Unknown network type {network}")
-
-        # Make sure memory accesses will be aligned
-        n_enc_out = n_levels * n_features_per_level
-        n_enc_pad = (n_enc_out + MLP_ALIGNMENT - 1) // MLP_ALIGNMENT * MLP_ALIGNMENT
-        self.n_pad = n_enc_pad - n_enc_out
-
-        self.network = NETWORK(
-            n_input_dims=n_enc_pad,
-            n_output_dims=n_output_dims,
-            n_hidden_layers=n_hidden_layers,
-            n_neurons=n_neurons,
-            activation=activation,
-            output_activation=output_activation,
-        )
-
-        self.encoder = ENCODER(
-            n_pos_dims=n_input_dims,
-            n_levels=n_levels,
-            n_features_per_level=n_features_per_level,
-            log2_hashmap_size=log2_hashmap_size,
-            base_resolution=base_resolution,
-            per_level_scale=per_level_scale,
-        )
-
-        self.encoding_config = self.encoder.encoding_config
-        self.network_config = self.network.network_config
-
-    def forward(self, x):
-        h = x.float()
-        h = self.encoder(x).float()
-        h = F.pad(h, (0, self.n_pad))
-        return self.network(h)
 
 
 def coherent_prime_hash(coords, log2_hashmap_size=0):
