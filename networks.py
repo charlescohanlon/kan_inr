@@ -302,9 +302,6 @@ def find_activation(activation):
         return F.sigmoid
 
 
-MLP_ALIGNMENT = 16
-
-
 class MLP_Native(torch.nn.Module):
     def __init__(
         self,
@@ -347,7 +344,7 @@ class MLP_Native(torch.nn.Module):
         )
         self.last = nn.Linear(
             self.n_neurons,
-            (self.n_output_dims + MLP_ALIGNMENT - 1) // MLP_ALIGNMENT * MLP_ALIGNMENT,
+            self.n_output_dims,
             bias=self.bias,
         )
 
@@ -439,13 +436,10 @@ class INR_Base(nn.Module):
         else:
             raise ValueError(f"Unsupported network type {network_type}")
 
-        # Make sure memory accesses will be aligned
         n_enc_out = n_levels * n_features_per_level
-        n_enc_pad = (n_enc_out + MLP_ALIGNMENT - 1) // MLP_ALIGNMENT * MLP_ALIGNMENT
-        self.n_pad = n_enc_pad - n_enc_out
 
         self.network = NETWORK(
-            n_input_dims=n_enc_pad,
+            n_input_dims=n_enc_out,
             n_output_dims=n_output_dims,
             n_hidden_layers=n_hidden_layers,
             n_neurons=n_neurons,
@@ -467,7 +461,6 @@ class INR_Base(nn.Module):
 
     def forward(self, x):
         h = self.encoder(x)
-        h = F.pad(h, (0, self.n_pad))
         return self.network(h)
 
 
