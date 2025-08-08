@@ -8,14 +8,13 @@ home_dir: "/grand/insitu/cohanlon"
 params_file: "alcf_kan_inr/params.json"
 data_path: "datasets/raw"
 
-num_workers: num_cpus
-save_model: False
-save_reconstruction: False
-enable_pbar: False    # progress bar is written to error file on PBS
+num_workers: 8
+pin_memory: True
+prefetch_factor: 4
+enable_pbar: True    # progress bar is written to error file on PBS
+repeats: 5
+
+save_mode: "largest" # save smallest or largest hashtable size for a given dataset INR
 
 # Model(s) to benchmark
 model_types: ["kan", "mlp"]
-
-# Training
-batch_size: 32768
-
