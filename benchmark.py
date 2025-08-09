@@ -44,7 +44,7 @@ class BenchmarkConfig:
     model_types: List[str]
     home_dir: str
     data_path: str
-    batch_size: Optional[int] = None  # if None, is calculated
+    batch_size: Optional[int] = None  # If None, is calculated
     output_filename: Optional[str] = None
     enable_pbar: bool = True
     shuffle: bool = True
@@ -54,12 +54,14 @@ class BenchmarkConfig:
     loss_fn: str = "MSE"
     repeats: int = 1  # Number of times to repeat each run for averaging results
     prefetch_factor: int = 2  # Prefetch factor for DataLoader workers
-    only_count_runs: bool = False  # If True, only count runs without executing them
-    # Save Modes: None = don't save, "largest" = save largest hashtable size, "smallest" = save smallest hashtable size
-    save_mode: Optional[str] = None
+    count_configs: bool = False  # If True, only count configurations to run
+    save_mode: Optional[str] = (
+        None  # Save Modes: None = don't save, "largest" = save largest
+    )
+    # hashtable size, "smallest" = save smallest hashtable size
     safety_margin: float = 0.99
-    select_dataset: Optional[str] = None
-    select_hashmap_size: Optional[int] = None
+    dataset: Optional[str] = None  # Filter to only include this dataset
+    hashmap_size: Optional[int] = None  # Filter to only include this hashmap size
 
 
 @dataclass
@@ -111,21 +113,21 @@ def cleanup_ddp():
 @hydra.main(version_base="1.3", config_path="conf")
 def main(cfg: BenchmarkConfig):
     runs_list = parse_run_params(cfg)
-    if cfg.only_count_runs:
-        print(len(runs_list))
-        return
 
-    if cfg.select_dataset is not None:
-        runs_list = [r for r in runs_list if r.dataset_name == cfg.select_dataset]
-    if cfg.select_hashmap_size is not None:
-        runs_list = [
-            r for r in runs_list if r.log2_hashmap_size == cfg.select_hashmap_size
-        ]
+    # Filter for specific dataset or specific hashmap size
+    if cfg.dataset is not None:
+        runs_list = [r for r in runs_list if r.dataset_name == cfg.dataset]
+    if cfg.hashmap_size is not None:
+        runs_list = [r for r in runs_list if r.log2_hashmap_size == cfg.hashmap_size]
     if len(runs_list) == 0:
         raise ValueError(
             f"No runs found with specified restrictions: "
-            f"{cfg.select_dataset}, {cfg.select_hashmap_size}"
+            f"{cfg.dataset}, {cfg.hashmap_size}"
         )
+
+    if cfg.count_configs:
+        print(len(runs_list))
+        return
 
     # Check if we should use DDP
     use_ddp = (

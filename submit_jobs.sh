@@ -251,7 +251,7 @@ main() {
     source $HOME_DIR/miniconda3/etc/profile.d/conda.sh
     
     # Get total number of runs
-    num_runs=$(conda run -n alcf_kan_inr python $HOME_DIR/alcf_kan_inr/benchmark.py -cn config only_count_runs=True)
+    num_runs=$(conda run -n alcf_kan_inr python $HOME_DIR/alcf_kan_inr/benchmark.py -cn config count_configs=True)
     
     if [ -z "$num_runs" ] || [ "$num_runs" -eq 0 ]; then
         log_message "ERROR: Could not determine number of runs"
