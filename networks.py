@@ -460,7 +460,7 @@ class INR_Base(nn.Module):
         self.network_config = self.network.network_config
 
     def forward(self, x):
-        h = self.encoder(x)
+        h = self.encoder(x).float()
         return self.network(h)
 
 

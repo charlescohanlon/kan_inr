@@ -91,9 +91,12 @@ class VolumetricDataset(IterableDataset):
         """Return the volume data in the original shape."""
         return self.data.reshape(self.data_shape, order=self.order)
 
-    def restore(self, data: torch.Tensor) -> torch.Tensor:
+    def unshuffle(self, data: torch.Tensor) -> torch.Tensor:
         if self.initial_shuffle:
             data = data[self.perm]
+        return data
+
+    def unnormalize(self, data: torch.Tensor) -> torch.Tensor:
         if self.normalize_values:
             min_val, max_val = self.data_range
             data = data * (max_val - min_val) + min_val

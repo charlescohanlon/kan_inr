@@ -1,9 +1,9 @@
 #!/bin/bash
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
-#PBS -q by-gpu
-#PBS -l select=1:ncpus=8:gputype=A100:system=sophia
-#PBS -l walltime=06:00:00
+#PBS -q by-node
+#PBS -l select=1:ncpus=64:gputype=A100:system=sophia
+#PBS -l walltime=01:00:00
 #PBS -l filesystems=home:grand
 #PBS -l place=scatter
 #PBS -o /grand/insitu/cohanlon/alcf_kan_inr/logs/
@@ -14,4 +14,9 @@ source /grand/insitu/cohanlon/miniconda3/etc/profile.d/conda.sh
 cd /grand/insitu/cohanlon/alcf_kan_inr
 conda activate alcf_kan_inr
 
-python benchmark.py -cn config
+# Get the number of GPUs
+NUM_GPUS=$(nvidia-smi -L | wc -l)
+echo "Number of GPUs detected: $NUM_GPUS"
+
+torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
+    benchmark.py -cn config
