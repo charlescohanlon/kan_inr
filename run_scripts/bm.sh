@@ -1,8 +1,8 @@
 #!/bin/bash
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
-#PBS -q by-node
-#PBS -l select=1:ncpus=64:gputype=A100:system=sophia
+#PBS -q by-gpu
+#PBS -l select=8:ncpus=8:gputype=A100:system=sophia
 #PBS -l walltime=01:00:00
 #PBS -l filesystems=home:grand
 #PBS -l place=scatter
@@ -16,7 +16,7 @@ conda activate alcf_kan_inr
 
 # Get the number of GPUs
 NUM_GPUS=$(nvidia-smi -L | wc -l)
-echo "Number of GPUs detected: $NUM_GPUS"
+echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
     benchmark.py -cn config
