@@ -59,6 +59,7 @@ class BenchmarkConfig:
     save_mode: Optional[str] = (
         None  # Save Modes: None = don't save, "largest" = save largest
     )
+    checkpoint_freq: Optional[int] = None  # if None, won't checkpoint
     # hashtable size, "smallest" = save smallest hashtable size
     safety_margin: float = 0.99
     dataset: Optional[str] = None  # Filter to only include this dataset
@@ -259,13 +260,6 @@ def run_benchmark(
     data_shape = tuple(map(int, dataset_info[-2].split("x")))
     data_dtype = np.dtype(dataset_info[-1])
 
-    # Each process gets its own dataset instance
-    # For DDP, we need to ensure different random seeds for shuffle
-    if is_ddp:
-        # Set different seed for each rank for data shuffling
-        torch.manual_seed(rank)
-        np.random.seed(rank)
-
     dataset = VolumetricDataset(
         file_path=data_path,
         data_shape=data_shape,
@@ -276,10 +270,13 @@ def run_benchmark(
         initial_shuffle=cfg.shuffle,
     )
 
-    # Reset seed for model initialization consistency
-    torch.manual_seed(0)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(0)
+    inr_name = "_".join(  # made up of parameters being swept
+        [
+            params.dataset_name,
+            params.model_type,
+            str(params.log2_hashmap_size),
+        ]
+    )
 
     # use native encoder (i.e., don't use TCNN) for KAN
     native_encoder = device.type == "cpu"
@@ -383,116 +380,56 @@ def run_benchmark(
                 if is_main_process:
                     print(f"(epoch {epoch + 1}): avg_loss = {avg_loss}")
 
+            # Save checkpoint every cfg.checkpoint_freq epochs
+            if (
+                is_main_process
+                and cfg.checkpoint_freq is not None
+                and (epoch + 1) % cfg.checkpoint_freq == 0
+            ):
+                reconst_data, eval_dataset = reconstruct(
+                    cfg, model.module if is_ddp else model, dataset, device, run_dtype
+                )
+                epoch_name = inr_name + f"_epoch_{epoch + 1}"
+                save(
+                    cfg,
+                    model.module if is_ddp else model,
+                    eval_dataset,
+                    reconst_data,
+                    epoch_name,
+                )
+
             # Synchronize at end of epoch
             if is_ddp:
                 dist.barrier()
 
-        # Only reconstruct and compute metrics on main process
+        # Reconstruct and compute metrics when finished training
         if is_main_process:
             print("Reconstructing INR volume...")
-            with torch.no_grad():
-                if cfg.batch_size is None:
-                    base_model = model.module if is_ddp else model
-                    eval_batch_size = calculate_batch_size(
-                        base_model,
-                        device,
-                        dataset.data_shape,
-                        run_dtype,
-                        is_training=False,  # Evaluation mode
-                        safety_margin=0.90,
-                    )
-                    # For eval, use full batch size on single GPU
-                    print(
-                        f"Calculated batch size: {dataset.batch_size:,} per GPU with "
-                        f"safety margin {cfg.safety_margin} for evaluation"
-                    )
-                    dataset.batch_size = eval_batch_size
+            reconst_data, eval_dataset = reconstruct(
+                cfg,
+                model.module if is_ddp else model,
+                dataset,
+                device,
+                run_dtype,
+                enable_pbar=True,  # default false to hide for checkpoints
+            )
 
-                reconst_data = torch.zeros(
-                    dataset.data_shape, device=device, dtype=run_dtype
-                )
-                model.eval()
+            print("Computing metrics...")
+            psnr, ssim, mse = compute_metrics(
+                cfg,
+                reconst_data,
+                eval_dataset,
+                device,
+                run_dtype,
+            )
 
-                # Create new dataset for reconstruction (without shuffling to get all data)
-                eval_dataset = VolumetricDataset(
-                    file_path=data_path,
-                    data_shape=data_shape,
-                    data_type=data_dtype,
-                    normalize_coords=True,
-                    normalize_values=True,
-                    order="F",
-                    initial_shuffle=False,  # No shuffle for reconstruction
-                    batch_size=dataset.batch_size,
-                )
+            cum_psnr += psnr
+            cum_ssim += ssim
+            cum_mse += mse
 
-                eval_dataloader = DataLoader(
-                    eval_dataset,
-                    batch_size=None,
-                    num_workers=0,  # Single process for eval
-                    pin_memory=pin,
-                )
-
-                data_shape_tensor = torch.as_tensor(
-                    dataset.data_shape, device=device, dtype=run_dtype
-                )
-                for x, _ in tqdm(eval_dataloader, disable=not cfg.enable_pbar):
-                    x = x.to(device, dtype=run_dtype, non_blocking=True)
-                    y = model(x).to(dtype=run_dtype, non_blocking=True)
-
-                    indices = torch.round(
-                        x * (data_shape_tensor - 1) if dataset.normalize_coords else x
-                    ).long()
-
-                    i, j, k = indices.split(1, dim=-1)
-
-                    # (batch_size,)
-                    i, j, k = i.squeeze(), j.squeeze(), k.squeeze()
-                    y = y.squeeze()
-
-                    reconst_data[i, j, k] = y
-
-                print("Computing metrics...")
-                # Get the data
-                gt_data = torch.as_tensor(
-                    eval_dataset.volume_data(), device=device, dtype=run_dtype
-                ).contiguous()
-                # NOTE: assuming the values are normalized to [0, 1] (i.e., normalize_values = True)
-                reconst_data = torch.clamp(reconst_data, 0.0, 1.0).contiguous()
-
-                # Process metrics slice-by-slice (more stable for 3D volumes)
-                psnr_values = []
-                mse_values = []
-                ssim_values = []
-
-                # Iterate through one dimension
-                num_slices = gt_data.shape[2]
-                for i in tqdm(range(num_slices), disable=not cfg.enable_pbar):
-
-                    # (1, 1, H, W)
-                    gt_slice = gt_data[:, :, i].unsqueeze(0).unsqueeze(0)
-                    reconst_slice = reconst_data[:, :, i].unsqueeze(0).unsqueeze(0)
-
-                    # Calculate metrics for this slice
-                    psnr_values.append(
-                        psnr_metric(reconst_slice, gt_slice, data_range=1.0)
-                    )
-                    mse_values.append(mse_metric(reconst_slice, gt_slice))
-                    ssim_values.append(
-                        ssim_metric(reconst_slice, gt_slice, data_range=1.0)
-                    )
-
-                # Average the metrics across all slices
-                psnr = torch.stack(psnr_values).mean().item()
-                mse = torch.stack(mse_values).mean().item()
-                ssim = torch.stack(ssim_values).mean().item()
-
-                cum_psnr += psnr
-                cum_ssim += ssim
-                cum_mse += mse
-
-                print(
-                    f"Repeat {repeat + 1}/{num_repeats}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
-                )
+            print(
+                f"Repeat {repeat + 1}/{num_repeats}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
+            )
 
         # Synchronize all processes before next repeat
         if is_ddp:
@@ -508,20 +445,12 @@ def run_benchmark(
         avg_mse = cum_mse / num_repeats
         print(f"PSNR: {avg_psnr}\nSSIM: {avg_ssim}\nMSE: {avg_mse}")
 
-        inr_name = "_".join(
-            [
-                params.dataset_name,
-                params.model_type,
-                str(params.log2_hashmap_size),
-            ]
-        )
-
         # Compute compression ratio
-        base_model = model.module if is_ddp else model
         with TemporaryDirectory() as tmpdir:
             tmpdir_path = Path(tmpdir)
-            inr_path = tmpdir_path / f"{inr_name}.pt"
-            torch.save(base_model.state_dict(), inr_path)
+            name = hash(model) % (10**8)
+            inr_path = tmpdir_path / f"{name}.pt"
+            torch.save(model.state_dict(), inr_path)
             model_size = inr_path.stat().st_size
 
         volume_size = (
@@ -539,42 +468,172 @@ def run_benchmark(
             )
 
         if should_save:
-            home_dir = Path(cfg.home_dir)
-            # Save the INR
-            save_path = home_dir / "saved_models" / f"{inr_name}.pt"
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            base_model = model.module if is_ddp else model
-            torch.save(base_model.state_dict(), save_path)
-            print(f"Model saved to {save_path}")
-
-            # Save the reconstruction as .raw file
-            save_order = dataset.order
-            save_type = dataset.data_type
-            save_shape = dataset.data_shape
-            if save_order != "F":
-                raise ValueError(
-                    f"Expected dataset order to be 'F' (Fortran-style), got {dataset.order}"
-                )
-            shape_str = "x".join(map(str, save_shape))
-            type_str = np.dtype(save_type).name
-            reconst_path = (
-                home_dir
-                / "saved_reconstructions"
-                / f"{inr_name}_{shape_str}_{type_str}.raw"
+            save(
+                cfg,
+                model.module if is_ddp else model,
+                eval_dataset,
+                reconst_data,
+                inr_name,
+                is_ddp,
             )
-            reconst_path.parent.mkdir(parents=True, exist_ok=True)
 
-            reconst_bytes = (
-                eval_dataset.unnormalize(reconst_data.flatten())
-                .cpu()
-                .numpy()
-                .astype(save_type)
-                .tobytes(save_order)
-            )
-            # write as .raw file
-            with open(reconst_path, "wb") as f:
-                f.write(reconst_bytes)
-            print(f"Reconstruction saved to {reconst_path}")
+
+@torch.no_grad()
+def reconstruct(
+    cfg: BenchmarkConfig,
+    model: INR_Base,
+    dataset: VolumetricDataset,
+    device: torch.device,
+    run_dtype: torch.dtype,
+    enable_pbar: bool = False,
+):
+    if cfg.batch_size is None:
+        eval_batch_size = calculate_batch_size(
+            model,
+            device,
+            dataset.data_shape,
+            run_dtype,
+            is_training=False,  # Evaluation mode
+            safety_margin=0.90,
+        )
+        # For eval, use full batch size on single GPU
+        print(
+            f"Calculated batch size: {dataset.batch_size:,} per GPU with "
+            f"safety margin {cfg.safety_margin} for evaluation"
+        )
+        dataset.batch_size = eval_batch_size
+
+    reconst_data = torch.zeros(dataset.data_shape, device=device, dtype=run_dtype)
+    model.eval()
+
+    data_path = dataset.file_path
+    data_shape = dataset.data_shape
+    data_dtype = dataset.data_type
+
+    # Create new dataset for reconstruction (without shuffling to get all data)
+    eval_dataset = VolumetricDataset(
+        file_path=data_path,
+        data_shape=data_shape,
+        data_type=data_dtype,
+        normalize_coords=True,
+        normalize_values=True,
+        order="F",
+        initial_shuffle=False,  # No shuffle for reconstruction
+        batch_size=dataset.batch_size,
+    )
+
+    pin = device.type == "cuda" and cfg.pin_memory
+    eval_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=None,
+        num_workers=0,  # Single process for eval
+        pin_memory=pin,
+    )
+
+    data_shape_tensor = torch.as_tensor(
+        dataset.data_shape, device=device, dtype=run_dtype
+    )
+    for x, _ in tqdm(eval_dataloader, disable=enable_pbar and not cfg.enable_pbar):
+        x = x.to(device, dtype=run_dtype, non_blocking=True)
+        y = model(x).to(dtype=run_dtype, non_blocking=True)
+
+        indices = torch.round(
+            x * (data_shape_tensor - 1) if dataset.normalize_coords else x
+        ).long()
+
+        i, j, k = indices.split(1, dim=-1)
+
+        # (batch_size,)
+        i, j, k = i.squeeze(), j.squeeze(), k.squeeze()
+        y = y.squeeze()
+
+        reconst_data[i, j, k] = y
+
+    return reconst_data, eval_dataset
+
+
+@torch.no_grad()
+def compute_metrics(
+    cfg: BenchmarkConfig,
+    reconst_data: torch.Tensor,
+    eval_dataset: VolumetricDataset,
+    device: torch.device,
+    run_dtype: torch.dtype,
+):
+    # Get the data
+    gt_data = torch.as_tensor(
+        eval_dataset.volume_data(), device=device, dtype=run_dtype
+    ).contiguous()
+    # NOTE: assuming the values are normalized to [0, 1] (i.e., eval_dataset.normalize_values = True)
+    reconst_data = torch.clamp(reconst_data, 0.0, 1.0).contiguous()
+
+    # Process metrics slice-by-slice (more stable for 3D volumes)
+    psnr_values = []
+    mse_values = []
+    ssim_values = []
+
+    # Iterate through one dimension
+    num_slices = gt_data.shape[2]
+    for i in tqdm(range(num_slices), disable=not cfg.enable_pbar):
+
+        # (1, 1, H, W)
+        gt_slice = gt_data[:, :, i].unsqueeze(0).unsqueeze(0)
+        reconst_slice = reconst_data[:, :, i].unsqueeze(0).unsqueeze(0)
+
+        # Calculate metrics for this slice
+        psnr_values.append(psnr_metric(reconst_slice, gt_slice, data_range=1.0))
+        mse_values.append(mse_metric(reconst_slice, gt_slice))
+        ssim_values.append(ssim_metric(reconst_slice, gt_slice, data_range=1.0))
+
+    # Average the metrics across all slices
+    psnr = torch.stack(psnr_values).mean().item()
+    mse = torch.stack(mse_values).mean().item()
+    ssim = torch.stack(ssim_values).mean().item()
+
+    return psnr, mse, ssim
+
+
+@torch.no_grad()
+def save(
+    cfg: BenchmarkConfig,
+    model: INR_Base,
+    eval_dataset: VolumetricDataset,
+    reconst_data: torch.Tensor,
+    inr_name: str,
+):
+    home_dir = Path(cfg.home_dir)
+    # Save the INR
+    save_path = home_dir / "saved_models" / f"{inr_name}.pt"
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), save_path)
+    print(f"Model saved to {save_path}")
+
+    # Save the reconstruction as .raw file
+    save_order = eval_dataset.order
+    save_type = eval_dataset.data_type
+    save_shape = eval_dataset.data_shape
+    if save_order != "F":
+        raise ValueError(
+            f"Expected dataset order to be 'F' (Fortran-style), got {eval_dataset.order}"
+        )
+    shape_str = "x".join(map(str, save_shape))
+    type_str = np.dtype(save_type).name
+    reconst_path = (
+        home_dir / "saved_reconstructions" / f"{inr_name}_{shape_str}_{type_str}.raw"
+    )
+    reconst_path.parent.mkdir(parents=True, exist_ok=True)
+
+    reconst_bytes = (
+        eval_dataset.unnormalize(reconst_data.flatten())
+        .cpu()
+        .numpy()
+        .astype(save_type)
+        .tobytes(save_order)
+    )
+    # write as .raw file
+    with open(reconst_path, "wb") as f:
+        f.write(reconst_bytes)
+    print(f"Reconstruction saved to {reconst_path}")
 
 
 def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
