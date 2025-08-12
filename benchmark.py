@@ -7,6 +7,7 @@ from hydra.core.config_store import ConfigStore
 import numpy as np
 from omegaconf import OmegaConf
 from tqdm import tqdm
+from time import time
 
 import torch
 from torch.utils.data import DataLoader
@@ -206,6 +207,7 @@ def main(cfg: BenchmarkConfig):
         should_save = params.log2_hashmap_size == specific_hashmap_size
 
     if rank == 0:
+        start_time = time()
         print(f"Running w/ parameters:")
         pprint(params)
         print("Saving INR:", should_save)
@@ -223,6 +225,9 @@ def main(cfg: BenchmarkConfig):
         )
     finally:
         cleanup_ddp()
+        end_time = time()
+        if rank == 0:
+            print(f"Total time: {end_time - start_time:.2f} seconds")
 
 
 def run_benchmark(
@@ -324,17 +329,13 @@ def run_benchmark(
                     optimizer=optimizer,
                     safety_margin=cfg.safety_margin,
                 )
-                # Adjust batch size for DDP (divide by world size)
-                if is_ddp:
-                    dataset.batch_size = max(1, dataset.batch_size // world_size)
                 if is_main_process:
                     print(
-                        f"Calculated batch size: {dataset.batch_size:,} per GPU with safety margin {cfg.safety_margin}"
+                        f"Calculated batch size: {dataset.batch_size:,} per GPU with "
+                        f"safety margin {cfg.safety_margin} for training"
                     )
             else:
                 dataset.batch_size = cfg.batch_size
-                if is_ddp:
-                    dataset.batch_size = max(1, cfg.batch_size // world_size)
 
         if cfg.loss_fn != "MSE":
             raise ValueError(f"Unsupported loss function: {cfg.loss_fn}")
@@ -368,7 +369,7 @@ def run_benchmark(
             ):
                 x = x.to(device, dtype=run_dtype, non_blocking=True)
                 y_hat = y_hat.to(device, dtype=run_dtype, non_blocking=True)
-                y = model(x)
+                y = model(x).to(dtype=run_dtype, non_blocking=True)
                 loss = loss_fn(y.squeeze(), y_hat)
                 optimizer.zero_grad()
                 loss.backward()
@@ -398,9 +399,13 @@ def run_benchmark(
                         dataset.data_shape,
                         run_dtype,
                         is_training=False,  # Evaluation mode
-                        safety_margin=cfg.safety_margin,
+                        safety_margin=0.90,
                     )
                     # For eval, use full batch size on single GPU
+                    print(
+                        f"Calculated batch size: {dataset.batch_size:,} per GPU with "
+                        f"safety margin {cfg.safety_margin} for evaluation"
+                    )
                     dataset.batch_size = eval_batch_size
 
                 reconst_data = torch.zeros(
@@ -432,15 +437,10 @@ def run_benchmark(
                 )
                 for x, _ in tqdm(eval_dataloader, disable=not cfg.enable_pbar):
                     x = x.to(device, dtype=run_dtype, non_blocking=True)
-                    y = model(x)
+                    y = model(x).to(dtype=run_dtype, non_blocking=True)
 
                     indices = torch.round(
-                        x * data_shape_tensor if dataset.normalize_coords else x
-                    )
-                    indices = torch.clamp(
-                        indices,
-                        torch.zeros_like(data_shape_tensor),
-                        data_shape_tensor - 1,
+                        x * (data_shape_tensor - 1) if dataset.normalize_coords else x
                     ).long()
 
                     i, j, k = indices.split(1, dim=-1)
@@ -456,7 +456,7 @@ def run_benchmark(
                 gt_data = torch.as_tensor(
                     eval_dataset.volume_data(), device=device, dtype=run_dtype
                 ).contiguous()
-                # NOTE: assuming the values are normalized to [0, 1]
+                # NOTE: assuming the values are normalized to [0, 1] (i.e., normalize_values = True)
                 reconst_data = torch.clamp(reconst_data, 0.0, 1.0).contiguous()
 
                 # Process metrics slice-by-slice (more stable for 3D volumes)
@@ -491,7 +491,7 @@ def run_benchmark(
                 cum_mse += mse
 
                 print(
-                    f"Repeat {repeat}/{num_repeats}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
+                    f"Repeat {repeat + 1}/{num_repeats}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
                 )
 
         # Synchronize all processes before next repeat
