@@ -3,9 +3,8 @@
 #PBS -A insitu
 #PBS -q by-gpu
 #PBS -l select=8:ncpus=8:gputype=A100:system=sophia
-#PBS -l walltime=01:00:00
+#PBS -l walltime=12:00:00
 #PBS -l filesystems=home:grand
-#PBS -l place=scatter
 #PBS -o /grand/insitu/cohanlon/alcf_kan_inr/logs/
 #PBS -e /grand/insitu/cohanlon/alcf_kan_inr/logs/
 # -----------------------------------
@@ -19,4 +18,4 @@ NUM_GPUS=$(nvidia-smi -L | wc -l)
 echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
-    benchmark.py -cn config
+    benchmark.py -cn config dataset=beechnut
