@@ -13,10 +13,10 @@ class VolumetricDataset(IterableDataset):
         file_path: Path,
         data_shape: Tuple[int, int, int],
         data_type: np.dtype,
+        batch_size: int,
         normalize_coords: bool = True,
         normalize_values: bool = True,
-        order: str = "F",  # col major order
-        batch_size: Optional[int] = None,  # if None, will be set later
+        order: str = "C",
         initial_shuffle: bool = True,
     ):
         if normalize_coords:
@@ -62,8 +62,6 @@ class VolumetricDataset(IterableDataset):
             self.world_size = dist.get_world_size()
 
     def __len__(self):
-        if self.batch_size is None:
-            raise ValueError("Batch size must be set for length calculation.")
         # Total samples for THIS rank
         samples_per_rank = self._get_samples_per_rank()
         return math.ceil(samples_per_rank / self.batch_size)
@@ -92,9 +90,6 @@ class VolumetricDataset(IterableDataset):
         return start_idx, end_idx
 
     def __iter__(self):
-        if self.batch_size is None:
-            raise ValueError("Batch size must be set for iteration.")
-
         # Get this rank's portion of data
         rank_start, rank_end = self._get_rank_data_range()
         rank_samples = rank_end - rank_start

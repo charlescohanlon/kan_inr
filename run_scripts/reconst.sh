@@ -3,7 +3,7 @@
 #PBS -A insitu
 #PBS -q by-gpu
 #PBS -l select=8:ncpus=8:gputype=A100:system=sophia
-#PBS -l walltime=03:00:00
+#PBS -l walltime=10:00:00
 #PBS -l filesystems=home:grand
 #PBS -o /grand/insitu/cohanlon/alcf_kan_inr/logs/
 #PBS -e /grand/insitu/cohanlon/alcf_kan_inr/logs/
@@ -17,6 +17,15 @@ conda activate alcf_kan_inr
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 
+# Use the benchmark.py program to fit an INR and run reconstruction for it
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
     benchmark.py -cn config \
-        dataset=beechnut
+        repeats=1 \
+        params_file="alcf_kan_inr/params.json" \
+        dataset="magnetic_reconnection" \
+        hashmap_size=16 \
+        epochs=1000 \
+        checkpoint_freq=250 \
+        checkpoint_save=True \
+        checkpoint_eval=True \
+        "model_types=["kan"]"

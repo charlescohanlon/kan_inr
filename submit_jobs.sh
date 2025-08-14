@@ -170,9 +170,9 @@ submit_job() {
     local job_id
     
     log_message "Submitting run index: $run_index"
-    
+
     # Submit job and capture job ID
-    job_id=$(qsub -v PBS_ARRAY_INDEX=$run_index $HOME_DIR/alcf_kan_inr/run_scripts/bm.sh 2>&1)
+    job_id=$(qsub -v PBS_ARRAY_INDEX=$run_index -N job_$run_index $HOME_DIR/alcf_kan_inr/run_scripts/bm.sh 2>&1)
 
     if [ $? -eq 0 ]; then
         log_message "Successfully submitted job $job_id for run index $run_index"
@@ -251,7 +251,7 @@ main() {
     source $HOME_DIR/miniconda3/etc/profile.d/conda.sh
     
     # Get total number of runs
-    num_runs=$(conda run -n alcf_kan_inr python $HOME_DIR/alcf_kan_inr/benchmark.py -cn config count_configs=True)
+    num_runs=$(conda run -n alcf_kan_inr python $HOME_DIR/alcf_kan_inr/benchmark.py -cn config dataset=beechnut count_configs=True)
     
     if [ -z "$num_runs" ] || [ "$num_runs" -eq 0 ]; then
         log_message "ERROR: Could not determine number of runs"

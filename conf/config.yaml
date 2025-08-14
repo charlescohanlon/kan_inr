@@ -3,15 +3,16 @@ defaults:
   - _self_             # then fill in the rest of the args with below
 
 home_dir: "/grand/insitu/cohanlon"
+ssd_dir: "/raid/scratch"
 
 # relative to home directory
 params_file: "alcf_kan_inr/params.json"
 data_path: "datasets/raw"
 
-num_workers: 8
+num_workers: 64
 pin_memory: True
 prefetch_factor: 4
-enable_pbar: True    # progress bar is written to error file on PBS
+enable_pbar: False    # progress bar is written to error file on PBS
 repeats: 5
 
 save_mode: "largest" # save smallest or largest hashtable size for a given dataset INR
