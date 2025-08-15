@@ -409,6 +409,7 @@ def run_benchmark(
                 is_main_process
                 and cfg.checkpoint_freq is not None
                 and (epoch + 1) % cfg.checkpoint_freq == 0
+                and epoch + 1 < params.epochs
             ):
                 reconst_data, reconst_dataset = reconstruct(
                     cfg, model.module if is_ddp else model, dataset, device, run_dtype
