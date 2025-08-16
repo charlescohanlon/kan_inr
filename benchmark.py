@@ -166,6 +166,7 @@ def main(cfg: BenchmarkConfig):
 
     # Select the run parameters based on the job array index
     job_array_idx = int(os.environ.get("PBS_ARRAY_INDEX", 0))
+    print(f"Running job array index: {job_array_idx}")
     params = runs_list[job_array_idx]
 
     if cfg.epochs is not None:
@@ -563,7 +564,7 @@ def reconstruct(
     )
 
     pin = device.type == "cuda" and cfg.pin_memory
-    eval_dataloader = DataLoader(
+    reconst_dataloader = DataLoader(
         reconst_dataset,
         batch_size=None,
         num_workers=0,  # Single process for eval
@@ -573,7 +574,9 @@ def reconstruct(
     data_shape_tensor = torch.as_tensor(
         reconst_dataset.data_shape, device=device, dtype=run_dtype
     )
-    for x, _ in tqdm(eval_dataloader, disable=not enable_pbar or not cfg.enable_pbar):
+    for x, _ in tqdm(
+        reconst_dataloader, disable=not enable_pbar or not cfg.enable_pbar
+    ):
         x = x.to(device, dtype=run_dtype, non_blocking=True)
         y = model(x).to(dtype=run_dtype, non_blocking=True)
 

@@ -3,7 +3,7 @@
 #PBS -A insitu
 #PBS -q by-gpu
 #PBS -l select=8:ncpus=8:gputype=A100:system=sophia
-#PBS -l walltime=10:00:00
+#PBS -l walltime=08:00:00
 #PBS -l filesystems=home:grand
 #PBS -o /grand/insitu/cohanlon/alcf_kan_inr/logs/
 #PBS -e /grand/insitu/cohanlon/alcf_kan_inr/logs/
@@ -22,10 +22,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
     benchmark.py -cn config \
         repeats=1 \
         params_file="alcf_kan_inr/params.json" \
-        dataset="magnetic_reconnection" \
-        hashmap_size=16 \
-        epochs=1000 \
-        checkpoint_freq=250 \
+        dataset="beechnut" \
+        hashmap_size=19 \
+        epochs=5000 \
+        checkpoint_freq=1000 \
         checkpoint_save=True \
         checkpoint_eval=True \
-        "model_types=["kan"]"
