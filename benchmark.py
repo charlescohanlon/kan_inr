@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 import gc
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 import hydra
 from hydra.core.config_store import ConfigStore
 import numpy as np
 from omegaconf import OmegaConf
-from tqdm import tqdm
+from tqdm import tqdm, trange
 from time import time
 
 import torch
@@ -51,7 +51,7 @@ class BenchmarkConfig:
     num_workers: int = 0
     pin_memory: bool = True
     run_dtype: str = "float32"  # Data type for all computations
-    loss_fn: str = "MSE"
+    loss_fn: str = "mae"  # default L1 loss
     repeats: int = 1  # Number of times to repeat each run for averaging results
     prefetch_factor: int = 2  # Prefetch factor for DataLoader workers
     count_configs: bool = False  # If True, only count configurations to run
@@ -359,9 +359,13 @@ def run_benchmark(
             initial_shuffle=cfg.shuffle,
         )
 
-        if cfg.loss_fn != "MSE":
+        if cfg.loss_fn.lower() == "mse":
+            loss_fn = nn.MSELoss()
+        elif cfg.loss_fn.lower() == "mae":
+            loss_fn = nn.L1Loss()
+        else:
             raise ValueError(f"Unsupported loss function: {cfg.loss_fn}")
-        loss_fn = nn.MSELoss()
+
         pin = device.type == "cuda" and cfg.pin_memory
 
         # For DDP with IterableDataset, adjust workers
@@ -385,14 +389,13 @@ def run_benchmark(
         for epoch in range(params.epochs):
             total_batch_loss = 0
             num_batches = 0
-
             for x, y_hat in tqdm(
                 dataloader, disable=not cfg.enable_pbar or not is_main_process
             ):
                 x = x.to(device, dtype=run_dtype, non_blocking=True)
                 y_hat = y_hat.to(device, dtype=run_dtype, non_blocking=True)
                 y = model(x).to(dtype=run_dtype, non_blocking=True)
-                loss = loss_fn(y.squeeze(), y_hat)
+                loss = loss_fn(y, y_hat)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -412,28 +415,36 @@ def run_benchmark(
                 and (epoch + 1) % cfg.checkpoint_freq == 0
                 and epoch + 1 < params.epochs
             ):
-                reconst_data, reconst_dataset = reconstruct(
-                    cfg, model.module if is_ddp else model, dataset, device, run_dtype
+                reconst_data = reconstruct(
+                    cfg,
+                    model.module if is_ddp else model,
+                    dataset,
+                    device,
+                    run_dtype,
+                    enable_pbar=False,  # Disable for checkpoints
                 )
                 if cfg.checkpoint_eval:
+                    gt_data = torch.as_tensor(
+                        dataset.volume_data(), device=device, dtype=run_dtype
+                    ).contiguous()
                     psnr, ssim, mse = compute_metrics(
                         cfg,
+                        gt_data,
                         reconst_data,
-                        reconst_dataset,
-                        device,
-                        run_dtype,
                     )
                     print(
                         f"Checkpoint {epoch + 1}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
                     )
                 if cfg.checkpoint_save:
                     epoch_name = inr_name + f"_epoch_{epoch + 1}"
+                    unnorm_data = dataset.unnormalize(reconst_data)
                     save(
                         cfg,
                         model.module if is_ddp else model,
-                        reconst_dataset,
-                        reconst_data,
+                        unnorm_data,
                         epoch_name,
+                        save_type=data_dtype,
+                        save_shape=data_shape,
                     )
 
             # Synchronize at end of epoch
@@ -443,7 +454,7 @@ def run_benchmark(
         # Reconstruct and compute metrics when finished training
         if is_main_process:
             print("Reconstructing INR volume...")
-            reconst_data, reconst_dataset = reconstruct(
+            reconst_data = reconstruct(
                 cfg,
                 model.module if is_ddp else model,
                 dataset,
@@ -453,12 +464,13 @@ def run_benchmark(
             )
 
             print("Computing metrics...")
+            gt_data = torch.as_tensor(
+                dataset.volume_data(), device=device, dtype=run_dtype
+            ).contiguous()
             psnr, ssim, mse = compute_metrics(
                 cfg,
+                gt_data,
                 reconst_data,
-                reconst_dataset,
-                device,
-                run_dtype,
             )
 
             cum_psnr += psnr
@@ -469,7 +481,7 @@ def run_benchmark(
                 f"Repeat {repeat + 1}/{num_repeats}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
             )
             if repeat + 1 < num_repeats:
-                del reconst_data, reconst_dataset
+                del gt_data, reconst_data
 
         # Clean up memory after all repeats except last
         if repeat + 1 < num_repeats:
@@ -496,13 +508,13 @@ def run_benchmark(
             torch.save(model.state_dict(), inr_path)
             model_size = inr_path.stat().st_size
 
-        volume_size = (
-            reconst_dataset.data.nbytes
-            if "reconst_dataset" in locals()
-            else dataset.data.nbytes
-        )
+        volume_size = dataset.volume_size
         compression_ratio = volume_size / model_size
-        print(f"Compression ratio: {compression_ratio:.2f}")
+        print(
+            f"Volume size: {volume_size:.2f} bytes, "
+            f"Model size: {model_size:.2f} bytes, "
+            f"Compression ratio: {compression_ratio:.2f}"
+        )
 
         with open(output_path, "a") as f:
             f.write(
@@ -511,12 +523,14 @@ def run_benchmark(
             )
 
         if should_save:
+            unnorm_data = dataset.unnormalize(reconst_data)
             save(
                 cfg,
                 model.module if is_ddp else model,
-                reconst_dataset,
-                reconst_data,
+                unnorm_data,
                 inr_name,
+                save_type=data_dtype,
+                save_shape=data_shape,
             )
 
 
@@ -529,23 +543,23 @@ def reconstruct(
     run_dtype: torch.dtype,
     enable_pbar: bool = False,
 ):
-    if cfg.batch_size is None:
-        eval_batch_size = calculate_batch_size(
-            model,
-            device,
-            dataset.data_shape,
-            run_dtype,
-            is_training=False,  # Evaluation mode
-            safety_margin=cfg.safety_margin,
-        )
-        print(
-            f"Calculated batch size: {eval_batch_size:,} per GPU with "
-            f"safety margin {cfg.safety_margin} for evaluation"
-        )
-    else:
-        eval_batch_size = cfg.batch_size
+    # if cfg.batch_size is None:
+    #     eval_batch_size = calculate_batch_size(
+    #         model,
+    #         device,
+    #         dataset.data_shape,
+    #         run_dtype,
+    #         is_training=False,  # Evaluation mode
+    #         safety_margin=cfg.safety_margin,
+    #     )
+    #     print(
+    #         f"Calculated batch size: {eval_batch_size:,} per GPU with "
+    #         f"safety margin {cfg.safety_margin} for evaluation"
+    #     )
+    # else:
+    #     eval_batch_size = cfg.batch_size
 
-    reconst_data = torch.zeros(dataset.data_shape, device=device, dtype=run_dtype)
+    # reconst_data = torch.zeros(dataset.data_shape, device=device, dtype=run_dtype)
     model.eval()
 
     data_path = dataset.file_path
@@ -553,58 +567,74 @@ def reconstruct(
     data_dtype = dataset.data_type
 
     # Create new dataset for reconstruction (without shuffling to get all data)
-    reconst_dataset = VolumetricDataset(
-        file_path=data_path,
-        data_shape=data_shape,
-        data_type=data_dtype,
-        batch_size=eval_batch_size,
-        normalize_coords=True,
-        normalize_values=True,
-        initial_shuffle=False,  # No shuffle for reconstruction
+    # reconst_dataset = VolumetricDataset(
+    #     file_path=data_path,
+    #     data_shape=data_shape,
+    #     data_type=data_dtype,
+    #     batch_size=eval_batch_size,
+    #     normalize_coords=True,
+    #     normalize_values=True,
+    #     initial_shuffle=False,  # No shuffle for reconstruction
+    # )
+
+    # pin = device.type == "cuda" and cfg.pin_memory
+    # reconst_dataloader = DataLoader(
+    #     reconst_dataset,
+    #     batch_size=None,
+    #     num_workers=0,  # Single process for eval
+    #     pin_memory=pin,
+    # )
+
+    # data_shape_tensor = torch.as_tensor(
+    #     reconst_dataset.data_shape, device=device, dtype=run_dtype
+    # )
+    # for x, _ in tqdm(
+    #     reconst_dataloader, disable=not enable_pbar or not cfg.enable_pbar
+    # ):
+    #     x = x.to(device, dtype=run_dtype, non_blocking=True)
+    #     y = model(x).to(dtype=run_dtype, non_blocking=True)
+
+    #     indices = (x * (data_shape_tensor - 1)).long()
+    #     i, j, k = indices.split(1, dim=-1)
+
+    #     # (batch_size,)
+    #     i, j, k = i.squeeze(), j.squeeze(), k.squeeze()
+    #     y = y.squeeze()
+
+    #     reconst_data[i, j, k] = y
+    xs = np.linspace(
+        0.5 / data_shape[0], (data_shape[0] - 0.5) / data_shape[0], data_shape[0]
     )
-
-    pin = device.type == "cuda" and cfg.pin_memory
-    reconst_dataloader = DataLoader(
-        reconst_dataset,
-        batch_size=None,
-        num_workers=0,  # Single process for eval
-        pin_memory=pin,
+    ys = np.linspace(
+        0.5 / data_shape[1], (data_shape[1] - 0.5) / data_shape[1], data_shape[0]
     )
-
-    data_shape_tensor = torch.as_tensor(
-        reconst_dataset.data_shape, device=device, dtype=run_dtype
+    zs = np.linspace(
+        0.5 / data_shape[2], (data_shape[2] - 0.5) / data_shape[2], data_shape[0]
     )
-    for x, _ in tqdm(
-        reconst_dataloader, disable=not enable_pbar or not cfg.enable_pbar
-    ):
-        x = x.to(device, dtype=run_dtype, non_blocking=True)
-        y = model(x).to(dtype=run_dtype, non_blocking=True)
+    coords = (
+        np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
+        .transpose(2, 1, 0, 3)  # Rearrange spatial dims z, y, x
+        .reshape(-1, 3)
+    )
+    coords = torch.tensor(coords, dtype=run_dtype, device=device)
 
-        indices = (x * (data_shape_tensor - 1)).long()
-        i, j, k = indices.split(1, dim=-1)
-
-        # (batch_size,)
-        i, j, k = i.squeeze(), j.squeeze(), k.squeeze()
-        y = y.squeeze()
-
-        reconst_data[i, j, k] = y
-
-    return reconst_data, reconst_dataset
+    reconst_data = model(coords).reshape(data_shape).to(dtype=run_dtype, device=device)
+    reconst_data = torch.clamp(reconst_data, 0.0, 1.0).contiguous()
+    return reconst_data
 
 
 @torch.no_grad()
 def compute_metrics(
     cfg: BenchmarkConfig,
+    gt_data: torch.Tensor,
     reconst_data: torch.Tensor,
-    reconst_dataset: VolumetricDataset,
-    device: torch.device,
-    run_dtype: torch.dtype,
 ):
-    # Get the data
-    gt_data = torch.as_tensor(
-        reconst_dataset.volume_data(), device=device, dtype=run_dtype
-    ).contiguous()
-    reconst_data = torch.clamp(reconst_data, 0.0, 1.0).contiguous()
+    if gt_data.min() < 0.0 or gt_data.max() > 1.0:
+        raise ValueError("Ground truth data must be in [0, 1] range")
+    if reconst_data.min() < 0.0 or reconst_data.max() > 1.0:
+        raise ValueError("Reconstructed data must be in [0, 1] range")
+    if gt_data.shape != reconst_data.shape:
+        raise ValueError(f"Shape mismatch: {gt_data.shape} vs {reconst_data.shape}")
 
     # Process metrics slice-by-slice (more stable for 3D volumes)
     psnr_values = []
@@ -613,7 +643,7 @@ def compute_metrics(
 
     # Iterate through one dimension
     num_slices = gt_data.shape[2]
-    for i in tqdm(range(num_slices), disable=not cfg.enable_pbar):
+    for i in trange(num_slices, disable=not cfg.enable_pbar):
 
         # (1, 1, H, W)
         gt_slice = gt_data[:, :, i].unsqueeze(0).unsqueeze(0)
@@ -636,9 +666,11 @@ def compute_metrics(
 def save(
     cfg: BenchmarkConfig,
     model: INR_Base,
-    reconst_dataset: VolumetricDataset,
     reconst_data: torch.Tensor,
     inr_name: str,
+    save_type: np.dtype,
+    save_shape: Tuple[str, str, str],
+    save_order: str = "C",
 ):
     home_dir = Path(cfg.home_dir)
     # Save the INR
@@ -648,9 +680,6 @@ def save(
     print(f"Model saved to {save_path}")
 
     # Save the reconstruction as .raw file
-    save_order = reconst_dataset.order
-    save_type = reconst_dataset.data_type
-    save_shape = reconst_dataset.data_shape
     shape_str = "x".join(map(str, save_shape))
     type_str = np.dtype(save_type).name
     reconst_path = (
@@ -658,11 +687,7 @@ def save(
     )
     reconst_path.parent.mkdir(parents=True, exist_ok=True)
 
-    reconst_data = torch.clamp(reconst_data, 0.0, 1.0)
-
     # restore data range to original
-    reconst_data = reconst_dataset.unnormalize(reconst_data)
-
     reconst_bytes = (
         reconst_data.flatten()
         .contiguous()

@@ -6,6 +6,8 @@ from torch.utils.data import IterableDataset, get_worker_info
 from pathlib import Path
 import torch.distributed as dist
 
+from samplers import VolumeSampler
+
 
 class VolumetricDataset(IterableDataset):
     def __init__(
@@ -19,31 +21,31 @@ class VolumetricDataset(IterableDataset):
         order: str = "C",
         initial_shuffle: bool = True,
     ):
-        if normalize_coords:
-            xs = np.linspace(0, 1, data_shape[0])
-            ys = np.linspace(0, 1, data_shape[1])
-            zs = np.linspace(0, 1, data_shape[2])
-        else:
-            xs = np.arange(data_shape[0])
-            ys = np.arange(data_shape[1])
-            zs = np.arange(data_shape[2])
-        self.coords = np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1).reshape(
-            -1, 3
+        # if normalize_coords:
+        #     xs = np.linspace(0, 1, data_shape[0])
+        #     ys = np.linspace(0, 1, data_shape[1])
+        #     zs = np.linspace(0, 1, data_shape[2])
+        # else:
+        #     xs = np.arange(data_shape[0])
+        #     ys = np.arange(data_shape[1])
+        #     zs = np.arange(data_shape[2])
+        # self.coords = np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1).reshape(
+        #     -1, 3
+        # )
+        xs = np.linspace(
+            0.5 / data_shape[0], (data_shape[0] - 0.5) / data_shape[0], data_shape[0]
         )
-        self.data = np.fromfile(file_path, dtype=data_type)
-        self.data_range = (np.min(self.data), np.max(self.data))
-
-        if initial_shuffle:
-            # Use a fixed seed for reproducible shuffling across all ranks
-            rng = np.random.RandomState(0)  # Fixed seed
-            self.perm = torch.from_numpy(rng.permutation(self.data.shape[0]))
-            self.coords = self.coords[self.perm]
-            self.data = self.data[self.perm]
-
-        if normalize_values:
-            min_val, max_val = self.data_range
-            self.data = (self.data - min_val) / (max_val - min_val)
-
+        ys = np.linspace(
+            0.5 / data_shape[1], (data_shape[1] - 0.5) / data_shape[1], data_shape[1]
+        )
+        zs = np.linspace(
+            0.5 / data_shape[2], (data_shape[2] - 0.5) / data_shape[2], data_shape[2]
+        )
+        self.coords = (
+            np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
+            .transpose(2, 1, 0, 3)  # Rearrange spatial dims to z, y, x
+            .reshape(-1, 3)
+        )
         self.file_path = file_path
         self.data_shape = data_shape
         self.data_type = data_type
@@ -53,6 +55,24 @@ class VolumetricDataset(IterableDataset):
         self.order = order
         self.batch_size = batch_size
         self.generator = torch.Generator()
+
+        self.data = np.fromfile(file_path, dtype=data_type)
+        self.data_range = (self.data.min(), self.data.max())
+        sampler = VolumeSampler(data_shape, np.dtype(data_type).name)
+        sampler.load_from_ndarray(self.data)
+        self.sampler = sampler
+        self.num_voxels = sampler.numvoxels
+        self.volume_size = self.num_voxels * np.dtype(data_type).itemsize
+
+        if initial_shuffle:
+            # Use a fixed seed for reproducible shuffling across all ranks
+            rng = np.random.RandomState(0)  # Fixed seed
+            self.perm = torch.from_numpy(rng.permutation(self.num_voxels))
+            self.coords = self.coords[self.perm]
+
+        if normalize_values:
+            min_val, max_val = self.data_range
+            self.data = (self.data - min_val) / (max_val - min_val)
 
         # DDP-related attributes
         self.rank = 0
@@ -68,7 +88,7 @@ class VolumetricDataset(IterableDataset):
 
     def _get_samples_per_rank(self):
         """Calculate number of samples for this rank"""
-        total_samples = self.data.shape[0]
+        total_samples = self.num_voxels
         samples_per_rank = total_samples // self.world_size
         # Handle remainder - last rank gets extra samples
         if self.rank == self.world_size - 1:
@@ -77,7 +97,7 @@ class VolumetricDataset(IterableDataset):
 
     def _get_rank_data_range(self):
         """Get the start and end indices for this rank's data"""
-        total_samples = self.data.shape[0]
+        total_samples = self.num_voxels
         samples_per_rank = total_samples // self.world_size
 
         start_idx = self.rank * samples_per_rank
@@ -127,7 +147,8 @@ class VolumetricDataset(IterableDataset):
         end = min(rank_start + ((batch_index + 1) * self.batch_size), rank_end)
 
         batch_coords = torch.tensor(self.coords[start:end], dtype=torch.float32)
-        batch_data = torch.tensor(self.data[start:end], dtype=torch.float32)
+        # batch_data = torch.tensor(self.data[start:end], dtype=torch.float32)
+        batch_data = self.sampler.get_samples(batch_coords)
 
         return batch_coords, batch_data
 

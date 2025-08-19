@@ -4,13 +4,13 @@
             "lrate": 0.01,
             "lrate_decay": 18,
             "epochs": 24,
-            "n_neurons": 16,
-            "n_hidden_layers": 1,
-            "n_levels": 1,
+            "n_neurons": 32,
+            "n_hidden_layers": 3,
+            "n_levels": 8,
             "n_features_per_level": 8,
-            "per_level_scale": 1.1,
+            "per_level_scale": 2,
             "log2_hashmap_size": 19,
-            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "base_resolution": 16,
             "zfp_enc": 0.02,
             "zfp_mlp": 0.01
         }
