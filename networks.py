@@ -1,5 +1,3 @@
-import os, math
-from typing import Tuple
 import warnings
 
 import torch
@@ -264,7 +262,7 @@ class HashEmbedderNative(nn.Module):
     def access(self, coords: torch.Tensor, level: int):
         scale = self.grid_scale(level, self.per_level_scale, self.base_resolution)
         resolution = self.grid_resolution(scale)
-        hashmap_size = self.embedding_lengths[level]
+        hashmap_size = max(1, self.embedding_lengths[level])
         indices, fractions = self.grid_indices(scale, coords)
         offsets = self.hash_it(hashmap_size, resolution, indices)
         return offsets, fractions
