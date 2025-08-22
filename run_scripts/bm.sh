@@ -2,13 +2,11 @@
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
 #PBS -q by-gpu
-#PBS -l select=8:ncpus=8:gputype=A100:system=sophia
-#PBS -l walltime=03:00:00
+#PBS -l select=1:ncpus=8:gputype=A100:system=sophia
+#PBS -l walltime=02:30:00
 #PBS -l filesystems=home:grand
 #PBS -o /grand/insitu/cohanlon/alcf_kan_inr/logs/
 #PBS -e /grand/insitu/cohanlon/alcf_kan_inr/logs/
-#PBS -m b
-#PBS -M charlescohanlon@gmail.com
 # -----------------------------------
 
 source /grand/insitu/cohanlon/miniconda3/etc/profile.d/conda.sh 

@@ -4,10 +4,14 @@ import numpy as np
 import torch
 
 # Data parameters
-data_root = "./data/"
-data_filename = "nucleon_41x41x41_uint8.raw"
-data_shape = (41, 41, 41)
-data_dtype = np.uint8
+# data_root = "./data/"
+# data_filename = "nucleon_41x41x41_uint8.raw"
+# data_shape = (41, 41, 41)
+# data_dtype = np.uint8
+data_root = "/grand/insitu/cohanlon/datasets/raw"
+data_filename = "beechnut_1024x1024x1546_uint16.raw"
+data_shape = (1024, 1024, 1546)
+data_dtype = np.uint16
 
 batch_size = 1024
 num_workers = 8
@@ -40,37 +44,63 @@ model = INR_Base(
 
 import time
 from tqdm import tqdm, trange
+from math import log
 
 DEVICE = torch.device("cuda")
+
 
 def Tensor(*args, **kwargs):
     return torch.tensor(*args, **kwargs, device=DEVICE)
 
+
 def mse2psnr(x, data_range=1.0):
     x = x / data_range * data_range
-    return (-10. * torch.log(x) / torch.log(Tensor(10.))) if torch.is_tensor(x) else (-10. * np.log(x) / np.log(10.))
+    return (
+        (-10.0 * torch.log(x) / log(10.0))
+        if torch.is_tensor(x)
+        else (-10.0 * np.log(x) / log(10.0))
+    )
+
 
 def l1_loss(x, y):
     return torch.nn.L1Loss()(x, y) if torch.is_tensor(x) else np.absolute(x - y).mean()
 
+
 def mse_loss(x, y):
     return torch.nn.MSELoss()(x, y) if torch.is_tensor(x) else np.mean((x - y) ** 2)
 
+
 epoch_losses = []
 
-def train(sampler, query, verbose=True, max_steps=50, lrate=1e-3, lrate_decay=500, batchsize=1024*64, **kwargs):
+
+def train(
+    sampler,
+    query,
+    verbose=True,
+    max_steps=50,
+    lrate=1e-3,
+    lrate_decay=500,
+    batchsize=1024 * 64,
+    **kwargs,
+):
     global epoch_losses
 
     # Create optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=lrate, 
-        betas=(0.9, 0.999), eps=1e-09, # weight_decay=1e-15, 
+    optimizer = torch.optim.Adam(
+        query.parameters(),
+        lr=lrate,
+        betas=(0.9, 0.999),
+        eps=1e-09,  # weight_decay=1e-15,
         # amsgrad=True, foreach=True #, fused=True,
     )
 
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=lrate_decay, gamma=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, step_size=lrate_decay, gamma=0.5
+    )
 
     # Training
     step = 0
+
     def task():
         nonlocal step
 
@@ -99,17 +129,21 @@ def train(sampler, query, verbose=True, max_steps=50, lrate=1e-3, lrate_decay=50
     # Training Loop
     time0 = time.time()
 
-    progress = trange(1, max_steps+1) if verbose else range(1, max_steps+1)
+    progress = trange(1, max_steps + 1) if verbose else range(1, max_steps + 1)
     for i in progress:
         loss, psnr = task()
-        if verbose: progress.set_postfix_str(
-            f'Loss: {loss:7.6f}, PSNR: {psnr:5.3f}dB, lrate: {scheduler.get_last_lr()[0]:5.3f}', refresh=True
-        ) 
+        if verbose:
+            progress.set_postfix_str(
+                f"Loss: {loss:7.6f}, PSNR: {psnr:5.3f}dB, lrate: {scheduler.get_last_lr()[0]:5.3f}",
+                refresh=True,
+            )
         epoch_losses.append(loss.item())
 
-    total_time = time.time()-time0
-    if verbose: print(f'[info] total training time: {total_time:5.3f}s, steps: {step}')
+    total_time = time.time() - time0
+    if verbose:
+        print(f"[info] total training time: {total_time:5.3f}s, steps: {step}")
     return total_time
+
 
 # %%
 from pathlib import Path
@@ -133,10 +167,10 @@ print(
     f"Dataset loaded with shape {dataset.data_shape} and type {np.dtype(dataset.data_type).name}"
 )
 
-# pin = device.type == "cuda"
-# dataloader = DataLoader(
-#     dataset, batch_size=None, num_workers=num_workers, pin_memory=pin
-# )
+pin = device.type == "cuda"
+dataloader = DataLoader(
+    dataset, batch_size=None, num_workers=num_workers, pin_memory=pin
+)
 
 # %%
 from torch.optim import AdamW
@@ -163,7 +197,7 @@ from tqdm import tqdm
 #         loss.backward()
 #         optimizer.step()
 #         loss_total += loss.item()
-# 
+#
 #     scheduler.step()
 #     avg_loss = loss_total / len(dataloader)
 #     epoch_losses.append(avg_loss)
@@ -176,7 +210,7 @@ gt_data = torch.as_tensor(
 
 from samplers import *
 
-sampler = VolumeSampler(data_shape, 'uint8')
+sampler = VolumeSampler(data_shape, "uint8")
 sampler.load_from_ndarray(gt_data.flatten())
 
 # ...
@@ -186,6 +220,9 @@ with torch.no_grad():
     mse = sampler.compute_mse(model, verbose=True)
 print(f"[info] mse: {mse}, psnr {mse2psnr(mse)}")
 
+import sys
+
+sys.exit(0)
 
 # %%
 import matplotlib.pyplot as plt
@@ -207,10 +244,20 @@ from torchmetrics.functional.image import structural_similarity_index_measure
 with torch.no_grad():
     # NOTE: you dont need to do things the same way. I am substracting 0.5 because I needed to match CUDA texture sampling conventions.
     # So I am using a cell-centered voxel definition.
-    xs = np.linspace(0.5/data_shape[0], (data_shape[0]-0.5)/data_shape[0], data_shape[0])
-    ys = np.linspace(0.5/data_shape[1], (data_shape[1]-0.5)/data_shape[1], data_shape[0])
-    zs = np.linspace(0.5/data_shape[2], (data_shape[2]-0.5)/data_shape[2], data_shape[0])
-    coords = np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1).transpose(2, 1, 0, 3).reshape(-1, 3)
+    xs = np.linspace(
+        0.5 / data_shape[0], (data_shape[0] - 0.5) / data_shape[0], data_shape[0]
+    )
+    ys = np.linspace(
+        0.5 / data_shape[1], (data_shape[1] - 0.5) / data_shape[1], data_shape[0]
+    )
+    zs = np.linspace(
+        0.5 / data_shape[2], (data_shape[2] - 0.5) / data_shape[2], data_shape[0]
+    )
+    coords = (
+        np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
+        .transpose(2, 1, 0, 3)
+        .reshape(-1, 3)
+    )
     coords = torch.tensor(coords, device="cuda")
 
     reconst_data = model(coords).reshape(data_shape).float()
@@ -241,14 +288,14 @@ model.eval()
 #     for x, _ in tqdm(reconst_dataloader):
 #         x = x.to(device, dtype=run_dtype, non_blocking=True)
 #         y = model(x).to(dtype=run_dtype, non_blocking=True)
-# 
+#
 #         indices = (x * (data_shape_tensor - 1)).long()
 #         i, j, k = indices.split(1, dim=-1)
-# 
+#
 #         # (batch_size,)
 #         i, j, k = i.squeeze(), j.squeeze(), k.squeeze()
 #         y = y.squeeze()
-# 
+#
 #         reconst_data[i, j, k] = y
 
 

@@ -9,8 +9,10 @@ import numpy as np
 
 
 class VolumeDesc:
-    def __init__(self, dims: List[int], dtype: str, numfields: int = 1, **kwargs):
-        self.device = torch.device("cpu")  # load onto cpu, will be moved later
+    def __init__(
+        self, dims: List[int], dtype: str, device: str, numfields: int = 1, **kwargs
+    ):
+        self.device = torch.device(device)
         self._dims = dims
         self.dimx = dims[0]
         self.dimy = dims[1]
@@ -85,7 +87,7 @@ class VolumeData(VolumeDesc):
         """
         Need to normalize value to [0, 1]
         """
-        self.data = torch.tensor(self.data, dtype=torch.float32, device=self.device)
+        self.data = torch.as_tensor(self.data, dtype=torch.float32, device=self.device)
         if minmax is None:
             dmax = torch.max(self.data)
             dmin = torch.min(self.data)
@@ -204,7 +206,10 @@ class VolumeSampler(VolumeDesc):
 
     def load_from_ndarray(self, *args, **kwargs):
         self.gt = VolumeData(
-            dims=self._dims, dtype=self._type, numfields=self.numfields
+            dims=self._dims,
+            dtype=self._type,
+            numfields=self.numfields,
+            device=self.device,
         )
         self.gt.from_ndarray(*args, **kwargs)
 
@@ -240,7 +245,7 @@ class VolumeSampler(VolumeDesc):
     def get_random_samples(self, numsamples: int):
         """Generate random coordinate and value pairs within the predefined bounding box"""
         coordinates = (
-            torch.rand(numsamples, 3, device=self.device, dtype=torch.float32)
+            torch.rand(numsamples, 3, dtype=torch.float32, device=self.device)
             * self.sampling_scale
             + self.bounds_lo
         )

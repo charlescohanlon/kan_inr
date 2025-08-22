@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import gc
+from operator import is_
 from typing import List, Optional, Tuple
 from pathlib import Path
 import hydra
@@ -8,12 +9,10 @@ import numpy as np
 from omegaconf import OmegaConf
 from tqdm import tqdm, trange
 from time import time
+import math
 
 import torch
-from torch.utils.data import DataLoader
 import torch.nn as nn
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import StepLR
 from torchmetrics.functional import mean_squared_error as mse_metric
 from torchmetrics.functional.image import peak_signal_noise_ratio as psnr_metric
 from torchmetrics.functional.image import (
@@ -22,9 +21,10 @@ from torchmetrics.functional.image import (
 
 import os
 import shutil
+from math import log
 
 from networks import INR_Base
-from volumetric_dataset import VolumetricDataset
+from samplers import VolumeSampler
 
 from tempfile import TemporaryDirectory
 from pprint import pprint
@@ -47,24 +47,14 @@ class BenchmarkConfig:
     batch_size: Optional[int] = None  # If None, is calculated
     output_filename: Optional[str] = None
     enable_pbar: bool = True
-    shuffle: bool = True
-    num_workers: int = 0
-    pin_memory: bool = True
-    run_dtype: str = "float32"  # Data type for all computations
     loss_fn: str = "mae"  # default L1 loss
     repeats: int = 1  # Number of times to repeat each run for averaging results
-    prefetch_factor: int = 2  # Prefetch factor for DataLoader workers
     count_configs: bool = False  # If True, only count configurations to run
+    # hashtable size - "smallest" = save smallest hashtable size
     save_mode: Optional[str] = (
         None  # Save Modes: None = don't save, "largest" = save largest
     )
-    checkpoint_freq: Optional[int] = None  # if None, won't checkpoint
-    checkpoint_save: bool = (
-        False  # If True, save model and reconstruction on checkpoint
-    )
-    checkpoint_eval: bool = False  # If True, evaluate model on checkpoint
-    # hashtable size, "smallest" = save smallest hashtable size
-    safety_margin: float = 0.70
+    safety_margin: float = 0.99
     dataset: Optional[str] = None  # Filter to only include this dataset
     hashmap_size: Optional[int] = None  # Filter to only include this hashmap size
     epochs: Optional[int] = None  # Override the number of epochs for all runs
@@ -138,15 +128,6 @@ def main(cfg: BenchmarkConfig):
         print(len(runs_list))
         return
 
-    if (
-        cfg.checkpoint_freq is not None
-        and not cfg.checkpoint_save
-        and not cfg.checkpoint_eval
-    ):
-        raise ValueError(
-            "Checkpointing is enabled but neither save nor eval set. So it's not doing anything."
-        )
-
     # Check if we should use DDP
     use_ddp = (
         torch.cuda.is_available()
@@ -166,7 +147,8 @@ def main(cfg: BenchmarkConfig):
 
     # Select the run parameters based on the job array index
     job_array_idx = int(os.environ.get("PBS_ARRAY_INDEX", 0))
-    print(f"Running job array index: {job_array_idx}")
+    if rank == 0:
+        print(f"Running job array index: {job_array_idx}")
     params = runs_list[job_array_idx]
 
     if cfg.epochs is not None:
@@ -246,9 +228,9 @@ def main(cfg: BenchmarkConfig):
             params,
             cfg,
             should_save,
-            rank=rank,
-            world_size=world_size,
-            local_rank=local_rank,
+            rank,
+            world_size,
+            local_rank,
         )
     finally:
         cleanup_ddp()
@@ -277,14 +259,13 @@ def run_benchmark(
         torch.cuda.set_device(local_rank)
     else:
         device = torch.device("cpu")
-    run_dtype = getattr(torch, cfg.run_dtype)
 
     # Create dataset
     dataset_info = data_path.stem.split("_")
-    # richtmyer_meshkov_2048x2048x1920_uint8 -> richtmyer_meshkov, (2048, 2048, 1920), np.uint8
+    # richtmyer_meshkov_2048x2048x1920_uint8 -> richtmyer_meshkov, (2048, 2048, 1920), uint8
     data_name = "_".join(dataset_info[:-2])
     data_shape = tuple(map(int, dataset_info[-2].split("x")))
-    data_dtype = np.dtype(dataset_info[-1])
+    data_type = dataset_info[-1]  # e.g., uint8, uint16
 
     inr_name = "_".join(  # made up of parameters being swept
         [
@@ -294,17 +275,42 @@ def run_benchmark(
         ]
     )
 
+    # Prepare data and sampler
+    xs = np.linspace(
+        0.5 / data_shape[0], (data_shape[0] - 0.5) / data_shape[0], data_shape[0]
+    )
+    ys = np.linspace(
+        0.5 / data_shape[1], (data_shape[1] - 0.5) / data_shape[1], data_shape[1]
+    )
+    zs = np.linspace(
+        0.5 / data_shape[2], (data_shape[2] - 0.5) / data_shape[2], data_shape[2]
+    )
+    coords = (
+        np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
+        .transpose(2, 1, 0, 3)  # Rearrange spatial dims to z, y, x
+        .reshape(-1, 3)
+    )
+    num_voxels = coords.shape[0]
+    data = np.fromfile(data_path, dtype=data_type)
+
+    sampler = VolumeSampler(data_shape, data_type, device)
+    sampler.load_from_ndarray(data)
+
+    # Use bounding boxes in 3D to partition sampling among ranks
+    top_corner, bottom_corner = partition_volume(data_shape, rank, world_size)
+    sampler.set_bounds([top_corner, bottom_corner])
+
     # use native encoder (i.e., don't use TCNN) for KAN
     native_encoder = device.type == "cpu"
     native_network = device.type == "cpu" or params.model_type != "mlp"
 
     cum_psnr, cum_ssim, cum_mse = 0.0, 0.0, 0.0
     num_repeats = cfg.repeats
-    for repeat in range(num_repeats):
+    for repeat in range(num_repeats):  # averages over num_repeats many runs
         if is_main_process:
             print(f"\nRunning repeat {repeat + 1}/{num_repeats}")
 
-        # Create model and optimizer stuff
+        # Create model
         model = INR_Base(
             n_input_dims=3,
             n_output_dims=1,
@@ -319,158 +325,86 @@ def run_benchmark(
             base_resolution=params.base_resolution,
             per_level_scale=params.per_level_scale,
         )
-        model.to(device, dtype=run_dtype, non_blocking=True)
+        model.to(device, non_blocking=True)
 
-        # Wrap model with DDP if in distributed mode
-        if is_ddp:
-            model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-
-        optimizer = AdamW(model.parameters(), lr=params.lrate)
-        scheduler = StepLR(optimizer, step_size=params.lrate_decay, gamma=0.1)
+        # Create optimizer
+        optimizer = torch.optim.Adam(
+            model.parameters(),
+            lr=params.lrate,
+            betas=(0.9, 0.999),
+            eps=1e-09,  # weight_decay=1e-15,
+            # amsgrad=True, foreach=True #, fused=True,
+        )
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=params.lrate_decay, gamma=0.5
+        )
 
         if cfg.batch_size is None:
             # Compute batch size based on dataset and model
             # Use the underlying model for batch size calculation
-            base_model = model.module if is_ddp else model
-            training_batch_size = calculate_batch_size(
-                base_model,
+            batch_size = calculate_batch_size(
+                model,
                 device,
                 data_shape,
-                run_dtype,
-                is_training=True,  # Training mode
+                is_training=True,
                 optimizer=optimizer,
                 safety_margin=cfg.safety_margin,
             )
             if is_main_process:
                 print(
-                    f"Calculated batch size: {training_batch_size:,} per GPU with "
+                    f"Calculated batch size: {batch_size:,} per GPU with "
                     f"safety margin {cfg.safety_margin} for training"
                 )
         else:
-            training_batch_size = cfg.batch_size
+            batch_size = cfg.batch_size
 
-        dataset = VolumetricDataset(
-            file_path=data_path,
-            data_shape=data_shape,
-            data_type=data_dtype,
-            batch_size=training_batch_size,
-            normalize_coords=True,
-            normalize_values=True,
-            initial_shuffle=cfg.shuffle,
-        )
-
-        if cfg.loss_fn.lower() == "mse":
-            loss_fn = nn.MSELoss()
-        elif cfg.loss_fn.lower() == "mae":
-            loss_fn = nn.L1Loss()
-        else:
-            raise ValueError(f"Unsupported loss function: {cfg.loss_fn}")
-
-        pin = device.type == "cuda" and cfg.pin_memory
-
-        # For DDP with IterableDataset, adjust workers
-        num_workers = cfg.num_workers
-        if is_ddp and num_workers > 0:
-            # Ensure at least 1 worker per process
-            num_workers = max(1, num_workers // world_size)
-
-        dataloader = DataLoader(
-            dataset,
-            batch_size=None,  # Use IterableDataset's batch size
-            num_workers=num_workers,
-            pin_memory=pin,
-            prefetch_factor=None if num_workers == 0 else cfg.prefetch_factor,
-            persistent_workers=num_workers > 0,
-        )
+        # Wrap model with DDP if in distributed mode
+        if is_ddp:
+            model = DDP(model, device_ids=[local_rank], output_device=local_rank)
 
         if is_main_process:
             print("Training INR...")
-        model.train()
-        for epoch in range(params.epochs):
-            total_batch_loss = 0
-            num_batches = 0
-            for x, y_hat in tqdm(
-                dataloader, disable=not cfg.enable_pbar or not is_main_process
-            ):
-                x = x.to(device, dtype=run_dtype, non_blocking=True)
-                y_hat = y_hat.to(device, dtype=run_dtype, non_blocking=True)
-                y = model(x).to(dtype=run_dtype, non_blocking=True)
-                loss = loss_fn(y, y_hat)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-                total_batch_loss += loss.item()
-                num_batches += 1
 
-            scheduler.step()
-            if num_batches > 0:
-                avg_loss = total_batch_loss / num_batches
-                if is_main_process:
-                    print(f"(epoch {epoch + 1}): avg_loss = {avg_loss}")
-
-            # Save checkpoint every cfg.checkpoint_freq epochs
-            if (
-                is_main_process
-                and cfg.checkpoint_freq is not None
-                and (epoch + 1) % cfg.checkpoint_freq == 0
-                and epoch + 1 < params.epochs
-            ):
-                reconst_data = reconstruct(
-                    cfg,
-                    model.module if is_ddp else model,
-                    dataset,
-                    device,
-                    run_dtype,
-                    enable_pbar=False,  # Disable for checkpoints
+        for i in range(params.epochs):
+            # Train the model (using Qi's sampler training code)
+            loss, psnr, duration = train(
+                sampler,
+                model,
+                optimizer,
+                batch_size,
+                enable_pbar=cfg.enable_pbar,
+                rank=rank,
+                world_size=world_size,
+            )
+            if is_main_process:
+                print(
+                    f"Epoch {i + 1}/{params.epochs}: "
+                    f"Loss = {loss:.4f}, "
+                    f"PSNR = {psnr:.2f}dB, "
+                    f"Duration = {duration:.2f}sec"
                 )
-                if cfg.checkpoint_eval:
-                    gt_data = torch.as_tensor(
-                        dataset.volume_data(), device=device, dtype=run_dtype
-                    ).contiguous()
-                    psnr, ssim, mse = compute_metrics(
-                        cfg,
-                        gt_data,
-                        reconst_data,
-                    )
-                    print(
-                        f"Checkpoint {epoch + 1}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
-                    )
-                if cfg.checkpoint_save:
-                    epoch_name = inr_name + f"_epoch_{epoch + 1}"
-                    unnorm_data = dataset.unnormalize(reconst_data)
-                    save(
-                        cfg,
-                        model.module if is_ddp else model,
-                        unnorm_data,
-                        epoch_name,
-                        save_type=data_dtype,
-                        save_shape=data_shape,
-                    )
-
-            # Synchronize at end of epoch
-            if is_ddp:
-                dist.barrier()
+            scheduler.step()  # Step the learning rate scheduler
 
         # Reconstruct and compute metrics when finished training
         if is_main_process:
+
             print("Reconstructing INR volume...")
             reconst_data = reconstruct(
-                cfg,
+                coords,
                 model.module if is_ddp else model,
-                dataset,
+                data_shape,
                 device,
-                run_dtype,
+                batch_size=cfg.batch_size,
+                safety_margin=cfg.safety_margin,
                 enable_pbar=cfg.enable_pbar,
             )
 
             print("Computing metrics...")
-            gt_data = torch.as_tensor(
-                dataset.volume_data(), device=device, dtype=run_dtype
-            ).contiguous()
+            gt_data = sampler.gt.data.reshape(data_shape)
             psnr, ssim, mse = compute_metrics(
-                cfg,
                 gt_data,
                 reconst_data,
+                enable_pbar=cfg.enable_pbar,
             )
 
             cum_psnr += psnr
@@ -481,11 +415,11 @@ def run_benchmark(
                 f"Repeat {repeat + 1}/{num_repeats}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
             )
             if repeat + 1 < num_repeats:
-                del gt_data, reconst_data
+                del reconst_data
 
         # Clean up memory after all repeats except last
         if repeat + 1 < num_repeats:
-            del dataset, model, optimizer, scheduler, dataloader, loss_fn
+            del model
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -498,7 +432,11 @@ def run_benchmark(
         avg_psnr = cum_psnr / num_repeats
         avg_ssim = cum_ssim / num_repeats
         avg_mse = cum_mse / num_repeats
-        print(f"Averages: PSNR = {avg_psnr}, SSIM = {avg_ssim}, MSE = {avg_mse}")
+        print(
+            f"Final: Avg PSNR = {avg_psnr}, "
+            f"Avg SSIM = {avg_ssim}, "
+            f"Avg MSE = {avg_mse}"
+        )
 
         # Compute compression ratio
         with TemporaryDirectory() as tmpdir:
@@ -508,12 +446,12 @@ def run_benchmark(
             torch.save(model.state_dict(), inr_path)
             model_size = inr_path.stat().st_size
 
-        volume_size = dataset.volume_size
+        volume_size = num_voxels * np.dtype(data_type).itemsize
         compression_ratio = volume_size / model_size
         print(
             f"Volume size: {volume_size:.2f} bytes, "
             f"Model size: {model_size:.2f} bytes, "
-            f"Compression ratio: {compression_ratio:.2f}"
+            f"Compression ratio: {compression_ratio:.2f}",
         )
 
         with open(output_path, "a") as f:
@@ -523,111 +461,142 @@ def run_benchmark(
             )
 
         if should_save:
-            unnorm_data = dataset.unnormalize(reconst_data)
+            if 0 <= reconst_data.min() and reconst_data.max() <= 1.0:
+                reconst_data = (  # un-normalize data (and move to cpu) before saving
+                    reconst_data.cpu() * (data.max() - data.min()) + data.min()
+                )
+
             save(
                 cfg,
                 model.module if is_ddp else model,
-                unnorm_data,
+                reconst_data,
                 inr_name,
-                save_type=data_dtype,
+                save_type=data_type,
                 save_shape=data_shape,
             )
 
 
+def train(
+    sampler: VolumeSampler,
+    model: INR_Base,
+    optimizer: torch.optim.Optimizer,
+    batch_size: int,
+    enable_pbar: bool = True,
+    rank: int = 0,
+    world_size: int = 1,
+    **kwargs,
+):
+    is_main_process = rank == 0
+
+    def mse2psnr(x, data_range=1.0):
+        x = x / data_range * data_range
+        return (
+            (-10.0 * torch.log(x) / log(10.0))
+            if torch.is_tensor(x)
+            else (-10.0 * np.log(x) / log(10.0))
+        )
+
+    def mse_loss(x, y):
+        return torch.nn.MSELoss()(x, y) if torch.is_tensor(x) else np.mean((x - y) ** 2)
+
+    num_voxels = sampler.numvoxels
+
+    # Approximately an epoch (divided amongst ranks)
+    num_steps = math.ceil(num_voxels / (batch_size * world_size))
+
+    # Training
+    def task():
+        optimizer.zero_grad()
+
+        # Reconstruction Loss
+        with torch.no_grad():
+            coords, targets = sampler.get_random_samples(batch_size)
+
+        values = model(coords)
+        loss = torch.nn.L1Loss()(values, targets)
+
+        # Backpropagation
+        loss.backward()
+        optimizer.step()
+
+        # Evaluation
+        with torch.no_grad():
+            psnr = mse2psnr(mse_loss(values, targets))
+
+        return loss, psnr
+
+    verbose = enable_pbar and is_main_process
+    time0 = time()
+    # Training Loop
+    progress = trange(1, num_steps + 1) if verbose else range(1, num_steps + 1)
+    for _ in progress:
+        loss, psnr = task()
+        if verbose:
+            progress.set_postfix_str(
+                f"Loss: {loss:7.6f}, PSNR: {psnr:5.3f}dB",
+                refresh=True,
+            )
+    duration = time() - time0
+    return loss, psnr, duration
+
+
 @torch.no_grad()
 def reconstruct(
-    cfg: BenchmarkConfig,
+    coords: torch.Tensor,
     model: INR_Base,
-    dataset: VolumetricDataset,
+    data_shape: Tuple[int, int, int],
     device: torch.device,
-    run_dtype: torch.dtype,
-    enable_pbar: bool = False,
+    batch_size: int = None,
+    safety_margin: float = 0.99,
+    enable_pbar: bool = True,
 ):
-    # if cfg.batch_size is None:
-    #     eval_batch_size = calculate_batch_size(
-    #         model,
-    #         device,
-    #         dataset.data_shape,
-    #         run_dtype,
-    #         is_training=False,  # Evaluation mode
-    #         safety_margin=cfg.safety_margin,
-    #     )
-    #     print(
-    #         f"Calculated batch size: {eval_batch_size:,} per GPU with "
-    #         f"safety margin {cfg.safety_margin} for evaluation"
-    #     )
-    # else:
-    #     eval_batch_size = cfg.batch_size
-
-    # reconst_data = torch.zeros(dataset.data_shape, device=device, dtype=run_dtype)
+    """
+    Reconstruct volume with batched inference to avoid OOM.
+    """
     model.eval()
 
-    data_path = dataset.file_path
-    data_shape = dataset.data_shape
-    data_dtype = dataset.data_type
+    # Calculate batch size if not provided
+    if batch_size is None:
+        # Use the calculate_batch_size function for evaluation
+        batch_size = calculate_batch_size(
+            model=model,
+            device=device,
+            data_shape=data_shape,
+            is_training=False,
+            safety_margin=safety_margin,
+        )
+        print(f"Using batch size {batch_size:,} for reconstruction")
 
-    # Create new dataset for reconstruction (without shuffling to get all data)
-    # reconst_dataset = VolumetricDataset(
-    #     file_path=data_path,
-    #     data_shape=data_shape,
-    #     data_type=data_dtype,
-    #     batch_size=eval_batch_size,
-    #     normalize_coords=True,
-    #     normalize_values=True,
-    #     initial_shuffle=False,  # No shuffle for reconstruction
-    # )
+    # Process in batches
+    num_coords = coords.shape[0]
+    reconst_list = []
 
-    # pin = device.type == "cuda" and cfg.pin_memory
-    # reconst_dataloader = DataLoader(
-    #     reconst_dataset,
-    #     batch_size=None,
-    #     num_workers=0,  # Single process for eval
-    #     pin_memory=pin,
-    # )
+    for i in trange(0, num_coords, batch_size, disable=not enable_pbar):
+        end_idx = min(i + batch_size, num_coords)
+        batch_coords = torch.tensor(
+            coords[i:end_idx],
+            dtype=torch.float32,
+            device=device,
+        )
+        # Forward pass for this batch
+        batch_output = model(batch_coords)
 
-    # data_shape_tensor = torch.as_tensor(
-    #     reconst_dataset.data_shape, device=device, dtype=run_dtype
-    # )
-    # for x, _ in tqdm(
-    #     reconst_dataloader, disable=not enable_pbar or not cfg.enable_pbar
-    # ):
-    #     x = x.to(device, dtype=run_dtype, non_blocking=True)
-    #     y = model(x).to(dtype=run_dtype, non_blocking=True)
+        # Store parts on cpu (OOM for some reason if don't do this)
+        reconst_list.append(batch_output.cpu())
 
-    #     indices = (x * (data_shape_tensor - 1)).long()
-    #     i, j, k = indices.split(1, dim=-1)
+        # Clean up
+        del batch_coords
+        if i % (batch_size * 10) == 0:  # Periodic cache clear
+            torch.cuda.empty_cache()
 
-    #     # (batch_size,)
-    #     i, j, k = i.squeeze(), j.squeeze(), k.squeeze()
-    #     y = y.squeeze()
-
-    #     reconst_data[i, j, k] = y
-    xs = np.linspace(
-        0.5 / data_shape[0], (data_shape[0] - 0.5) / data_shape[0], data_shape[0]
-    )
-    ys = np.linspace(
-        0.5 / data_shape[1], (data_shape[1] - 0.5) / data_shape[1], data_shape[0]
-    )
-    zs = np.linspace(
-        0.5 / data_shape[2], (data_shape[2] - 0.5) / data_shape[2], data_shape[0]
-    )
-    coords = (
-        np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
-        .transpose(2, 1, 0, 3)  # Rearrange spatial dims z, y, x
-        .reshape(-1, 3)
-    )
-    coords = torch.tensor(coords, dtype=run_dtype, device=device)
-
-    reconst_data = model(coords).reshape(data_shape).to(dtype=run_dtype, device=device)
+    reconst_data = torch.cat(reconst_list, dim=0).reshape(data_shape).to(device)
     reconst_data = torch.clamp(reconst_data, 0.0, 1.0).contiguous()
     return reconst_data
 
 
 @torch.no_grad()
 def compute_metrics(
-    cfg: BenchmarkConfig,
-    gt_data: torch.Tensor,
-    reconst_data: torch.Tensor,
+    gt_data: torch.Tensor, reconst_data: torch.Tensor, enable_pbar: bool = True
 ):
     if gt_data.min() < 0.0 or gt_data.max() > 1.0:
         raise ValueError("Ground truth data must be in [0, 1] range")
@@ -635,6 +604,8 @@ def compute_metrics(
         raise ValueError("Reconstructed data must be in [0, 1] range")
     if gt_data.shape != reconst_data.shape:
         raise ValueError(f"Shape mismatch: {gt_data.shape} vs {reconst_data.shape}")
+    if len(gt_data.shape) != 3:
+        raise ValueError("Metrics computation only supports 3D volumes")
 
     # Process metrics slice-by-slice (more stable for 3D volumes)
     psnr_values = []
@@ -643,7 +614,7 @@ def compute_metrics(
 
     # Iterate through one dimension
     num_slices = gt_data.shape[2]
-    for i in trange(num_slices, disable=not cfg.enable_pbar):
+    for i in trange(num_slices, disable=not enable_pbar):
 
         # (1, 1, H, W)
         gt_slice = gt_data[:, :, i].unsqueeze(0).unsqueeze(0)
@@ -751,14 +722,13 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
 
 
 def calculate_batch_size(
-    model,
+    model: INR_Base,
     device,
     data_shape,
-    run_dtype,
     is_training=True,
     optimizer=None,
     min_batch=1,
-    max_batch=10_000_000,  # 10 million max to cover your use case
+    max_batch=10_000_000,
     safety_margin=0.99,
 ):
     """
@@ -779,7 +749,7 @@ def calculate_batch_size(
     for test_batch in test_sizes:
         try:
             torch.cuda.empty_cache()
-            test_input = torch.randn(test_batch, 3, device=device, dtype=run_dtype)
+            test_input = torch.randn(test_batch, 3, device=device, dtype=torch.float32)
 
             if is_training:
                 output = model(test_input)
@@ -827,7 +797,7 @@ def calculate_batch_size(
             torch.cuda.synchronize()
 
             # Test this batch size
-            test_input = torch.randn(mid_batch, 3, device=device, dtype=run_dtype)
+            test_input = torch.randn(mid_batch, 3, device=device, dtype=torch.float32)
 
             if is_training:
                 output = model(test_input)
@@ -846,7 +816,7 @@ def calculate_batch_size(
                     # For eval, test reconstruction tensor allocation periodically
                     if mid_batch > best_batch * 1.5:  # Significant increase
                         test_reconst = torch.zeros(
-                            data_shape, device=device, dtype=run_dtype
+                            data_shape, device=device, dtype=torch.float32
                         )
                         del test_reconst
 
@@ -867,6 +837,9 @@ def calculate_batch_size(
             else:
                 raise e
 
+    if model.network_type == "kan":
+        safety_margin *= 0.75
+
     final_batch = max(1, int(best_batch * safety_margin))
 
     # Quick sanity check - if we're getting a tiny batch size for an INR, something's wrong
@@ -877,6 +850,75 @@ def calculate_batch_size(
         )
 
     return final_batch
+
+
+def partition_volume(data_shape, rank, world_size):
+    """
+    Simple partitioning strategy that splits along x, then y, then z as needed.
+
+    Args:
+        data_shape: tuple of (x_len, y_len, z_len)
+        rank: current rank (0 to world_size-1)
+        world_size: total number of ranks (must be power of 2)
+
+    Returns:
+        top_corner: [x_min, y_min, z_min] of the partition
+        bottom_corner: [x_max, y_max, z_max] of the partition
+    """
+    x_len, y_len, z_len = data_shape
+
+    # For 2 ranks: split x dimension only
+    # For 4 ranks: split x and y dimensions (2x2 grid)
+    # For 8 ranks: split all three dimensions (2x2x2 grid)
+
+    # Calculate grid dimensions
+    if world_size == 1:
+        grid_x, grid_y, grid_z = 1, 1, 1
+    elif world_size == 2:
+        grid_x, grid_y, grid_z = 2, 1, 1
+    elif world_size == 4:
+        grid_x, grid_y, grid_z = 2, 2, 1
+    elif world_size == 8:
+        grid_x, grid_y, grid_z = 2, 2, 2
+    elif world_size == 16:
+        grid_x, grid_y, grid_z = 4, 2, 2
+    elif world_size == 32:
+        grid_x, grid_y, grid_z = 4, 4, 2
+    elif world_size == 64:
+        grid_x, grid_y, grid_z = 4, 4, 4
+    else:
+        # General case: factor world_size
+        grid_x = 2 ** math.ceil(math.log2(world_size) / 3)
+        grid_y = (
+            2 ** math.ceil(math.log2(world_size // grid_x) / 2)
+            if world_size > grid_x
+            else 1
+        )
+        grid_z = world_size // (grid_x * grid_y)
+
+    # Calculate indices for this rank
+    idx_x = rank % grid_x
+    idx_y = (rank // grid_x) % grid_y
+    idx_z = rank // (grid_x * grid_y)
+
+    # Calculate partition boundaries
+    size_x = x_len // grid_x
+    size_y = y_len // grid_y
+    size_z = z_len // grid_z
+
+    x_start = idx_x * size_x
+    y_start = idx_y * size_y
+    z_start = idx_z * size_z
+
+    # Give remainder pixels to the last partition
+    x_end = x_start + size_x if idx_x < grid_x - 1 else x_len
+    y_end = y_start + size_y if idx_y < grid_y - 1 else y_len
+    z_end = z_start + size_z if idx_z < grid_z - 1 else z_len
+
+    top_corner = [x_start, y_start, z_start]
+    bottom_corner = [x_end, y_end, z_end]
+
+    return top_corner, bottom_corner
 
 
 if __name__ == "__main__":

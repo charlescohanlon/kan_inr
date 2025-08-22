@@ -2,13 +2,11 @@
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
 #PBS -q by-gpu
-#PBS -l select=8:ncpus=8:gputype=A100:system=sophia
-#PBS -l walltime=12:00:00
+#PBS -l select=1:ncpus=8:gputype=A100:system=sophia
+#PBS -l walltime=00:30:00
 #PBS -l filesystems=home:grand
 #PBS -o /grand/insitu/cohanlon/alcf_kan_inr/logs/
 #PBS -e /grand/insitu/cohanlon/alcf_kan_inr/logs/
-#PBS -m b
-#PBS -M charlescohanlon@gmail.com
 # -----------------------------------
 
 source /grand/insitu/cohanlon/miniconda3/etc/profile.d/conda.sh 
@@ -23,7 +21,5 @@ echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
     benchmark.py -cn config \
         repeats=1 \
-        params_file="alcf_kan_inr/params.json" \
-        dataset="beechnut" \
-        hashmap_size=19 \
-        enable_pbar=False
+        params_file="alcf_kan_inr/params_debug.json" \
+        enable_pbar=True

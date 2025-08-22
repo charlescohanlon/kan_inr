@@ -9,11 +9,8 @@ ssd_dir: "/raid/scratch"
 params_file: "alcf_kan_inr/params.json"
 data_path: "datasets/raw"
 
-num_workers: 64
-pin_memory: True
-prefetch_factor: 4
 enable_pbar: False    # progress bar is written to error file on PBS
-repeats: 5
+repeats: 1
 
 save_mode: "largest" # save smallest or largest hashtable size for a given dataset INR
 

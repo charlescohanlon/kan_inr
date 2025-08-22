@@ -425,6 +425,7 @@ class INR_Base(nn.Module):
     ):
         super(INR_Base, self).__init__()
 
+        self.network_type = network_type.lower()
         self.n_input_dims = n_input_dims
         self.n_output_dims = n_output_dims
 
