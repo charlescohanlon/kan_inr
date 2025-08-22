@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 import gc
-from operator import is_
 from typing import List, Optional, Tuple
 from pathlib import Path
 import hydra
@@ -41,7 +40,7 @@ if torch.cuda.is_available():
 @dataclass
 class BenchmarkConfig:
     params_file: str
-    model_types: List[str]
+    network_types: List[str]
     home_dir: str
     data_path: str
     batch_size: Optional[int] = None  # If None, is calculated
@@ -49,7 +48,6 @@ class BenchmarkConfig:
     enable_pbar: bool = True
     loss_fn: str = "mae"  # default L1 loss
     repeats: int = 1  # Number of times to repeat each run for averaging results
-    count_configs: bool = False  # If True, only count configurations to run
     # hashtable size - "smallest" = save smallest hashtable size
     save_mode: Optional[str] = (
         None  # Save Modes: None = don't save, "largest" = save largest
@@ -66,7 +64,7 @@ class BenchmarkConfig:
 @dataclass
 class RunParams:
     dataset_name: str  # e.g., "richtmyer_meshkov"
-    model_type: str
+    network_type: str
     lrate: float
     lrate_decay: int
     epochs: int
@@ -112,21 +110,6 @@ def cleanup_ddp():
 @hydra.main(version_base="1.3", config_path="conf")
 def main(cfg: BenchmarkConfig):
     runs_list = parse_run_params(cfg)
-
-    # Filter for specific dataset or specific hashmap size
-    if cfg.dataset is not None:
-        runs_list = [r for r in runs_list if r.dataset_name == cfg.dataset]
-    if cfg.hashmap_size is not None:
-        runs_list = [r for r in runs_list if r.log2_hashmap_size == cfg.hashmap_size]
-    if len(runs_list) == 0:
-        raise ValueError(
-            f"No runs found with specified restrictions: "
-            f"{cfg.dataset}, {cfg.hashmap_size}"
-        )
-
-    if cfg.count_configs:
-        print(len(runs_list))
-        return
 
     # Check if we should use DDP
     use_ddp = (
@@ -181,7 +164,11 @@ def main(cfg: BenchmarkConfig):
         # Create a unique filename based on the parameter sweeping
         unique_filename = (
             "_".join(
-                [params.dataset_name, params.model_type, str(params.log2_hashmap_size)]
+                [
+                    params.dataset_name,
+                    params.network_type,
+                    str(params.log2_hashmap_size),
+                ]
             )
             + "_results.csv"
         )
@@ -192,7 +179,31 @@ def main(cfg: BenchmarkConfig):
     # Only write header on rank 0
     if rank == 0:
         with open(output_path, "w") as f:
-            f.write("model,dataset,log2_hashmap_size,compression_ratio,psnr,ssim,mse\n")
+            f.write(
+                ",".join(
+                    [
+                        "dataset_name",
+                        "data_size",
+                        "inr_size",
+                        "network_type",
+                        "epoch_count",
+                        "num_neurons",
+                        "num_hidden_layers",
+                        "num_levels",
+                        "num_features_per_level",
+                        "per_level_scale",
+                        "log2_hashmap_size",
+                        "base_resolution",
+                        "num_repeats",
+                        "avg_time_per_epoch",
+                        "num_gpus",
+                        "compression_ratio",
+                        "avg_psnr",
+                        "avg_ssim",
+                        "avg_mse",
+                    ]
+                )
+            )
 
     # Check if we should save the model based on the save_mode
     should_save = False
@@ -260,53 +271,24 @@ def run_benchmark(
     else:
         device = torch.device("cpu")
 
-    # Create dataset
-    dataset_info = data_path.stem.split("_")
-    # richtmyer_meshkov_2048x2048x1920_uint8 -> richtmyer_meshkov, (2048, 2048, 1920), uint8
-    data_name = "_".join(dataset_info[:-2])
-    data_shape = tuple(map(int, dataset_info[-2].split("x")))
-    data_type = dataset_info[-1]  # e.g., uint8, uint16
-
-    inr_name = "_".join(  # made up of parameters being swept
-        [
-            params.dataset_name,
-            params.model_type,
-            str(params.log2_hashmap_size),
-        ]
-    )
-
-    # Prepare data and sampler
-    xs = np.linspace(
-        0.5 / data_shape[0], (data_shape[0] - 0.5) / data_shape[0], data_shape[0]
-    )
-    ys = np.linspace(
-        0.5 / data_shape[1], (data_shape[1] - 0.5) / data_shape[1], data_shape[1]
-    )
-    zs = np.linspace(
-        0.5 / data_shape[2], (data_shape[2] - 0.5) / data_shape[2], data_shape[2]
-    )
-    coords = (
-        np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
-        .transpose(2, 1, 0, 3)  # Rearrange spatial dims to z, y, x
-        .reshape(-1, 3)
-    )
-    num_voxels = coords.shape[0]
+    _, data_shape, data_type = parse_filename(data_path)
     data = np.fromfile(data_path, dtype=data_type)
 
+    # Prepare data and sampler
     sampler = VolumeSampler(data_shape, data_type, device)
     sampler.load_from_ndarray(data)
 
-    # Use bounding boxes in 3D to partition sampling among ranks
+    # Use bounding boxes in 3D to partition sampling among ranks for DDP
     top_corner, bottom_corner = partition_volume(data_shape, rank, world_size)
     sampler.set_bounds([top_corner, bottom_corner])
 
     # use native encoder (i.e., don't use TCNN) for KAN
     native_encoder = device.type == "cpu"
-    native_network = device.type == "cpu" or params.model_type != "mlp"
+    native_network = device.type == "cpu" or params.network_type != "mlp"
 
     cum_psnr, cum_ssim, cum_mse = 0.0, 0.0, 0.0
     num_repeats = cfg.repeats
-    for repeat in range(num_repeats):  # averages over num_repeats many runs
+    for repeat in range(num_repeats):  # averages results over num_repeats many runs
         if is_main_process:
             print(f"\nRunning repeat {repeat + 1}/{num_repeats}")
 
@@ -316,7 +298,7 @@ def run_benchmark(
             n_output_dims=1,
             native_encoder=native_encoder,
             native_network=native_network,
-            network_type=params.model_type,
+            network_type=params.network_type,
             n_hidden_layers=params.n_hidden_layers,
             n_neurons=params.n_neurons,
             n_levels=params.n_levels,
@@ -365,6 +347,7 @@ def run_benchmark(
         if is_main_process:
             print("Training INR...")
 
+        durations = []
         for i in range(params.epochs):
             # Train the model (using Qi's sampler training code)
             loss, psnr, duration = train(
@@ -376,6 +359,7 @@ def run_benchmark(
                 rank=rank,
                 world_size=world_size,
             )
+            durations.append(duration)
             if is_main_process:
                 print(
                     f"Epoch {i + 1}/{params.epochs}: "
@@ -387,10 +371,8 @@ def run_benchmark(
 
         # Reconstruct and compute metrics when finished training
         if is_main_process:
-
             print("Reconstructing INR volume...")
             reconst_data = reconstruct(
-                coords,
                 model.module if is_ddp else model,
                 data_shape,
                 device,
@@ -446,7 +428,7 @@ def run_benchmark(
             torch.save(model.state_dict(), inr_path)
             model_size = inr_path.stat().st_size
 
-        volume_size = num_voxels * np.dtype(data_type).itemsize
+        volume_size = sampler.numvoxels * np.dtype(data_type).itemsize
         compression_ratio = volume_size / model_size
         print(
             f"Volume size: {volume_size:.2f} bytes, "
@@ -454,10 +436,37 @@ def run_benchmark(
             f"Compression ratio: {compression_ratio:.2f}",
         )
 
+        avg_time_per_epoch = sum(durations) / len(durations)
+        num_gpus = torch.cuda.device_count()
+
         with open(output_path, "a") as f:
             f.write(
-                f"{params.model_type},{params.dataset_name},{params.log2_hashmap_size},"
-                f"{compression_ratio},{avg_psnr},{avg_ssim},{avg_mse}\n"
+                ",".join(
+                    map(
+                        str,
+                        [
+                            params.dataset_name,
+                            volume_size,
+                            model_size,
+                            params.network_type,
+                            params.epochs,
+                            params.n_neurons,
+                            params.n_hidden_layers,
+                            params.n_levels,
+                            params.n_features_per_level,
+                            params.per_level_scale,
+                            params.log2_hashmap_size,
+                            params.base_resolution,
+                            cfg.repeats,
+                            avg_time_per_epoch,
+                            num_gpus,
+                            compression_ratio,
+                            avg_psnr,
+                            avg_ssim,
+                            avg_mse,
+                        ],
+                    )
+                )
             )
 
         if should_save:
@@ -465,7 +474,13 @@ def run_benchmark(
                 reconst_data = (  # un-normalize data (and move to cpu) before saving
                     reconst_data.cpu() * (data.max() - data.min()) + data.min()
                 )
-
+            inr_name = "_".join(  # made up of parameters being swept
+                [
+                    params.dataset_name,
+                    params.network_type,
+                    str(params.log2_hashmap_size),
+                ]
+            )
             save(
                 cfg,
                 model.module if is_ddp else model,
@@ -542,7 +557,6 @@ def train(
 
 @torch.no_grad()
 def reconstruct(
-    coords: torch.Tensor,
     model: INR_Base,
     data_shape: Tuple[int, int, int],
     device: torch.device,
@@ -568,6 +582,26 @@ def reconstruct(
         print(f"Using batch size {batch_size:,} for reconstruction")
 
     # Process in batches
+    xs = np.linspace(
+        0.5 / data_shape[0],
+        (data_shape[0] - 0.5) / data_shape[0],
+        data_shape[0],
+    )
+    ys = np.linspace(
+        0.5 / data_shape[1],
+        (data_shape[1] - 0.5) / data_shape[1],
+        data_shape[1],
+    )
+    zs = np.linspace(
+        0.5 / data_shape[2],
+        (data_shape[2] - 0.5) / data_shape[2],
+        data_shape[2],
+    )
+    coords = (
+        np.stack(np.meshgrid(xs, ys, zs, indexing="ij"), axis=-1)
+        .transpose(2, 1, 0, 3)  # Rearrange spatial dims to z, y, x
+        .reshape(-1, 3)
+    )
     num_coords = coords.shape[0]
     reconst_list = []
 
@@ -671,54 +705,6 @@ def save(
     with open(reconst_path, "wb") as f:
         f.write(reconst_bytes)
     print(f"Reconstruction saved to {reconst_path}")
-
-
-def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
-    home_dir = Path(cfg.home_dir)
-    params_file = OmegaConf.load(home_dir / cfg.params_file)
-    runs = []
-    for dataset_name, params in params_file.items():
-        for param in params:
-            hashmap_sizes = param["log2_hashmap_size"]
-            size_sweep = (
-                [hashmap_sizes] if isinstance(hashmap_sizes, int) else hashmap_sizes
-            )
-
-            dependent_base_resolution = False
-            if param["base_resolution"] == "(int)cbrt(1<<log2_hashmap_size)":
-                # compute base resolution from hashmap size
-                dependent_base_resolution = True
-            elif not isinstance(param["base_resolution"], int):
-                raise ValueError(
-                    "base_resolution must be an int or (int)cbrt(1<<log2_hashmap_size)"
-                )
-
-            for size in range(size_sweep[0], size_sweep[-1] + 1):
-                if dependent_base_resolution:
-                    base_resolution = int((1 << size) ** (1 / 3))
-                else:
-                    base_resolution = param["base_resolution"]
-
-                for model_type in cfg.model_types:
-                    run_params = RunParams(
-                        dataset_name=dataset_name,
-                        model_type=model_type,
-                        lrate=param["lrate"],
-                        lrate_decay=param["lrate_decay"],
-                        epochs=param["epochs"],
-                        n_neurons=param["n_neurons"],
-                        n_hidden_layers=param["n_hidden_layers"],
-                        n_levels=param["n_levels"],
-                        n_features_per_level=param["n_features_per_level"],
-                        per_level_scale=param["per_level_scale"],
-                        base_resolution=base_resolution,
-                        log2_hashmap_size=size,
-                        zfp_enc=param["zfp_enc"],
-                        zfp_mlp=param["zfp_mlp"],
-                    )
-                    runs.append(run_params)
-
-    return runs
 
 
 def calculate_batch_size(
@@ -919,6 +905,76 @@ def partition_volume(data_shape, rank, world_size):
     bottom_corner = [x_end, y_end, z_end]
 
     return top_corner, bottom_corner
+
+
+def parse_filename(data_path: Path):
+    # richtmyer_meshkov_2048x2048x1920_uint8 -> richtmyer_meshkov, (2048, 2048, 1920), uint8
+    dataset_info = data_path.stem.split("_")
+    data_name = "_".join(dataset_info[:-2])
+    data_shape = tuple(map(int, dataset_info[-2].split("x")))
+    data_type = dataset_info[-1]  # e.g., uint8, uint16
+
+    return data_name, data_shape, data_type
+
+
+def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
+    home_dir = Path(cfg.home_dir)
+    params_file = OmegaConf.load(home_dir / cfg.params_file)
+    runs: List[RunParams] = []
+    for dataset_name, params in params_file.items():
+        for param in params:
+            hashmap_sizes = param["log2_hashmap_size"]
+            size_sweep = (
+                [hashmap_sizes] if isinstance(hashmap_sizes, int) else hashmap_sizes
+            )
+
+            dependent_base_resolution = False
+            if param["base_resolution"] == "(int)cbrt(1<<log2_hashmap_size)":
+                # compute base resolution from hashmap size
+                dependent_base_resolution = True
+            elif not isinstance(param["base_resolution"], int):
+                raise ValueError(
+                    "base_resolution must be an int or (int)cbrt(1<<log2_hashmap_size)"
+                )
+
+            for size in range(size_sweep[0], size_sweep[-1] + 1):
+                if dependent_base_resolution:
+                    base_resolution = int((1 << size) ** (1 / 3))
+                else:
+                    base_resolution = param["base_resolution"]
+
+                for network_type in cfg.network_types:
+                    run_params = RunParams(
+                        dataset_name=dataset_name,
+                        network_type=network_type,
+                        lrate=param["lrate"],
+                        lrate_decay=param["lrate_decay"],
+                        epochs=param["epochs"],
+                        n_neurons=param["n_neurons"],
+                        n_hidden_layers=param["n_hidden_layers"],
+                        n_levels=param["n_levels"],
+                        n_features_per_level=param["n_features_per_level"],
+                        per_level_scale=param["per_level_scale"],
+                        base_resolution=base_resolution,
+                        log2_hashmap_size=size,
+                        zfp_enc=param["zfp_enc"],
+                        zfp_mlp=param["zfp_mlp"],
+                    )
+                    runs.append(run_params)
+
+    # Filter for specific dataset or specific hashmap size
+    if cfg.dataset is not None:
+        runs = [r for r in runs if r.dataset_name == cfg.dataset]
+    if cfg.hashmap_size is not None:
+        runs = [r for r in runs if r.log2_hashmap_size == cfg.hashmap_size]
+
+    if len(runs) == 0:
+        raise ValueError(
+            f"No runs found with specified restrictions: "
+            f"{cfg.dataset}, {cfg.hashmap_size}"
+        )
+
+    return runs
 
 
 if __name__ == "__main__":
