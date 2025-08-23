@@ -167,3 +167,7 @@ outputs/
 logs/
 *.raw
 .vscode/
+
+# Saved models and reconstructions
+saved_reconstructions/
+saved_models/

@@ -420,6 +420,7 @@ class INR_Base(nn.Module):
         per_level_scale=2.0,
         activation="ReLU",
         output_activation="None",
+        suppress_encoder_nan=False,
     ):
         super(INR_Base, self).__init__()
 
@@ -427,6 +428,7 @@ class INR_Base(nn.Module):
         self.n_input_dims = n_input_dims
         self.n_output_dims = n_output_dims
 
+        self.suppress_encoder_nan = suppress_encoder_nan
         ENCODER = HashEmbedderNative if native_encoder else HashEmbedderTCNN
         if network_type.lower() == "mlp":
             NETWORK = MLP_Native if native_network else MLP_TCNN
@@ -460,6 +462,8 @@ class INR_Base(nn.Module):
 
     def forward(self, x):
         h = self.encoder(x).float()
+        if self.suppress_encoder_nan:
+            h = torch.nan_to_num(h)
         return self.network(h)
 
 

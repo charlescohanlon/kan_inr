@@ -15,4 +15,4 @@ repeats: 1
 save_mode: "largest" # save smallest or largest hashtable size for a given dataset INR
 
 # Model(s) to benchmark
-model_types: ["kan", "mlp"]
+network_types: ["kan", "mlp"]

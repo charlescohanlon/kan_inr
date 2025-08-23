@@ -19,11 +19,11 @@ conda activate alcf_kan_inr
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 
-# Use the benchmark.py program to fit an INR and run reconstruction for it
+# Use the benchmark.py program to fit an INR, then decompress and save the result
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
     benchmark.py -cn config \
         repeats=1 \
         params_file="alcf_kan_inr/params.json" \
-        dataset="beechnut" \
-        hashmap_size=19 \
-        enable_pbar=False
+        dataset="magnetic_reconnection" \
+        hashmap_size=16 \
+        enable_pbar=True

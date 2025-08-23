@@ -1,10 +1,10 @@
+"""
+Qi's optimized data sampler code and accompanying utilities.
+"""
+
 import os
-from typing import Union, List
-
+from typing import List
 import torch
-
-# from torch.utils.data import Dataset, DataLoader
-
 import numpy as np
 
 
