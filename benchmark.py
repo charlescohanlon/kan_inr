@@ -52,7 +52,7 @@ class BenchmarkConfig:
     save_mode: Optional[str] = (
         None  # Save Modes: None = don't save, "largest" = save largest
     )
-    safety_margin: float = 0.99
+    safety_margin: float = 0.80
     dataset: Optional[str] = None  # Filter to only include this dataset
     hashmap_size: Optional[int] = None  # Filter to only include this hashmap size
     epochs: Optional[int] = None  # Override the number of epochs for all runs
@@ -281,6 +281,7 @@ def run_benchmark(
     # Use bounding boxes in 3D to partition sampling among ranks for DDP
     top_corner, bottom_corner = partition_volume(data_shape, rank, world_size)
     sampler.set_bounds([top_corner, bottom_corner])
+    print(f"Rank {rank}: Sampler bounds set to {top_corner} - {bottom_corner}")
 
     # use native encoder (i.e., don't use TCNN) for KAN
     native_encoder = device.type == "cpu"
@@ -482,7 +483,7 @@ def run_benchmark(
                 ]
             )
             save(
-                cfg,
+                cfg.home_dir,
                 model.module if is_ddp else model,
                 reconst_data,
                 inr_name,
@@ -669,42 +670,48 @@ def compute_metrics(
 
 @torch.no_grad()
 def save(
-    cfg: BenchmarkConfig,
+    save_dir: Path,
     model: INR_Base,
     reconst_data: torch.Tensor,
     inr_name: str,
     save_type: np.dtype,
     save_shape: Tuple[str, str, str],
     save_order: str = "C",
+    save_model: bool = True,
+    save_reconstruction: bool = True,
 ):
-    home_dir = Path(cfg.home_dir)
-    # Save the INR
-    save_path = home_dir / "saved_models" / f"{inr_name}.pt"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(model.state_dict(), save_path)
-    print(f"Model saved to {save_path}")
+    save_dir = Path(save_dir)
+    if save_model:
+        # Save the INR
+        save_path = save_dir / "saved_models" / f"{inr_name}.pt"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(model.state_dict(), save_path)
+        print(f"Model saved to {save_path}")
 
-    # Save the reconstruction as .raw file
-    shape_str = "x".join(map(str, save_shape))
-    type_str = np.dtype(save_type).name
-    reconst_path = (
-        home_dir / "saved_reconstructions" / f"{inr_name}_{shape_str}_{type_str}.raw"
-    )
-    reconst_path.parent.mkdir(parents=True, exist_ok=True)
+    if save_reconstruction:
+        # Save the reconstruction as .raw file
+        shape_str = "x".join(map(str, save_shape))
+        type_str = np.dtype(save_type).name
+        reconst_path = (
+            save_dir
+            / "saved_reconstructions"
+            / f"{inr_name}_{shape_str}_{type_str}.raw"
+        )
+        reconst_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # restore data range to original
-    reconst_bytes = (
-        reconst_data.flatten()
-        .contiguous()
-        .cpu()
-        .numpy()
-        .astype(save_type)
-        .tobytes(save_order)
-    )
-    # write as .raw file
-    with open(reconst_path, "wb") as f:
-        f.write(reconst_bytes)
-    print(f"Reconstruction saved to {reconst_path}")
+        # restore data range to original
+        reconst_bytes = (
+            reconst_data.flatten()
+            .contiguous()
+            .cpu()
+            .numpy()
+            .astype(save_type)
+            .tobytes(save_order)
+        )
+        # write as .raw file
+        with open(reconst_path, "wb") as f:
+            f.write(reconst_bytes)
+        print(f"Reconstruction saved to {reconst_path}")
 
 
 def calculate_batch_size(
@@ -907,9 +914,9 @@ def partition_volume(data_shape, rank, world_size):
     return top_corner, bottom_corner
 
 
-def parse_filename(data_path: Path):
+def parse_filename(data_path: str | Path):
     # richtmyer_meshkov_2048x2048x1920_uint8 -> richtmyer_meshkov, (2048, 2048, 1920), uint8
-    dataset_info = data_path.stem.split("_")
+    dataset_info = Path(data_path).stem.split("_")
     data_name = "_".join(dataset_info[:-2])
     data_shape = tuple(map(int, dataset_info[-2].split("x")))
     data_type = dataset_info[-1]  # e.g., uint8, uint16
