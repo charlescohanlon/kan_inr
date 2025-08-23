@@ -55,7 +55,7 @@ alcf_kan_inr/
 ├── conf/                               # Hydra configuration files
 │   └── config.yaml                     # Main configuration file
 ├── data/                               # Sample datasets
-│   └── nucleon_41x41x41_uint8.raw     # Demo dataset
+│   └── nucleon_41x41x41_uint8.raw      # Demo dataset
 ├── run_scripts/                        # Utility scripts
 │   ├── debug.sh                        # Debug script
 │   └── reconst.sh                      # Reconstruction example
