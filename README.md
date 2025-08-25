@@ -35,15 +35,12 @@ This project implements a comprehensive benchmarking system for comparing differ
 
 ```bash
 # Clone the repository
-git clone git@github.com:charlescohanlon/alcf_kan_inr.git
-cd alcf_kan_inr
+git clone git@github.com:charlescohanlon/kan_inr.git
+cd kan_inr
 
-# Create conda environment (or use micromamba)
-conda env create -f environment.yml
-conda activate alcf_kan_inr
-
-# Install package in development mode
-pip install -e .
+# Run setup script (on Sophia)
+./setup.sh
+conda activate kan_inr # kan_inr is resulting env name (can change this in setup.sh)
 ```
 
 ---
@@ -51,7 +48,7 @@ pip install -e .
 ## Repository Structure
 
 ```
-alcf_kan_inr/
+kan_inr/
 ├── conf/                               # Hydra configuration files
 │   └── config.yaml                     # Main configuration file
 ├── demo_data/                          # Sample datasets
@@ -283,8 +280,8 @@ Benchmarks produce CSV files with the following metrics:
 ### Saved Models and Reconstructions
 
 When `save_mode` is specified:
-- Models saved to: `{home_dir}/saved_models/{name}.pt`
-- Reconstructions saved to: `{home_dir}/saved_reconstructions/{name}_{shape}_{dtype}.raw`
+- Models saved to: `{home_dir}/models_saved/{name}.pt`
+- Reconstructions saved to: `{home_dir}/reconstructions_saved/{name}_{shape}_{dtype}.raw`
 
 ---
 
@@ -331,7 +328,7 @@ If you use this code in your research, please cite: (TODO: replace placeholders 
   title = {KAN-INR: Kolmogorov-Arnold Networks for Implicit Neural Representations},
   author = {[Authors]},
   year = {2024},
-  url = {https://github.com/charlescohanlon/alcf_kan_inr}
+  url = {https://github.com/charlescohanlon/kan_inr}
 }
 ```
 
