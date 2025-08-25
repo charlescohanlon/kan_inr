@@ -27,9 +27,7 @@ This project implements a comprehensive benchmarking system for comparing differ
 ## Installation
 
 ### Prerequisites
-- CUDA-capable GPU (recommended)
-- Python 3.8+
-- PyTorch 2.0+
+- A100 GPU(s) w/ drivers installed
 
 ### Setup
 
@@ -65,7 +63,8 @@ kan_inr/
 ├── params.json                         # Benchmark parameters
 ├── params_debug.json                   # Debug parameters
 ├── vis.ipynb                           # Visualization notebook
-├── environment.yml                     # Conda environment
+├── requirements.txt                    # Package dependencies
+├── setup.sh                            # Environment setup script
 └── README.md                           # This file
 ```
 
