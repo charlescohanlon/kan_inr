@@ -106,7 +106,7 @@ class VolumeData(VolumeDesc):
         """
         x, y, z = coordinates[:, 0], coordinates[:, 1], coordinates[:, 2]
         indices = x + y * self.dimx + z * (self.dimx * self.dimy)
-        return self.data[indices.long()]
+        return self.data[indices.int()]
 
     def nearest_interpolation(self, coordinates: torch.Tensor):
         """
