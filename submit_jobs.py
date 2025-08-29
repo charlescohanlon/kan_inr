@@ -13,8 +13,8 @@ from dataclasses import dataclass
 
 import hydra
 from hydra.core.config_store import ConfigStore
-from omegaconf import DictConfig, OmegaConf
 import numpy as np
+from omegaconf import DictConfig, OmegaConf
 
 # Import everything we need from benchmark.py
 from benchmark import BenchmarkConfig, RunParams, parse_filename, parse_run_params
@@ -26,7 +26,7 @@ class SubmissionConfig(BenchmarkConfig):
 
     # Submission-specific parameters
     max_jobs: int = 20
-    wait_time: int = 120
+    wait_time: int = 10 * 60  # seconds
     dry_run: bool = False
     verbose: bool = False
 
@@ -97,7 +97,7 @@ class JobSubmissionManager:
         self.dry_run = cfg.dry_run
         self.verbose = cfg.verbose
         self.home_dir = Path(cfg.home_dir)
-        self.log_dir = self.home_dir / "alcf_kan_inr" / "logs"
+        self.log_dir = self.home_dir / "kan_inr" / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def get_dataset_info(self, dataset_name: str) -> Tuple[Tuple[int, int, int], str]:
@@ -200,9 +200,7 @@ class JobSubmissionManager:
             * params.n_features_per_level
             * params.n_levels
             * 2
-        ) / (
-            1024**3
-        )  # Approximate
+        ) / 1024**3
 
         # Network parameter memory (rough estimate)
         if params.network_type == "kan":
@@ -227,12 +225,12 @@ class JobSubmissionManager:
         memory_per_gpu = 35  # Conservative limit (leave headroom)
         num_gpus = max(1, int(np.ceil(total_memory_gb / memory_per_gpu)))
 
-        if total_time > 3600 * 2:  # total_time (in seconds) greater than 2 hours
+        seconds_per_hour = 3600
+        if total_time > seconds_per_hour * 2:
             num_gpus = max(2, num_gpus)
-        if total_time > 3600 * 5:
+        if total_time > seconds_per_hour * 4:
             num_gpus = max(4, num_gpus)
-        if total_time > 3600 * 10:
-            # Cap at 8 GPUs (typical node limit)
+        if total_time > seconds_per_hour * 8:
             num_gpus = 8
 
         # Adjust time estimate for multi-GPU (not perfect scaling)
@@ -313,8 +311,8 @@ class JobSubmissionManager:
 export PBS_ARRAY_INDEX={run_index}
 
 source {self.home_dir}/miniconda3/etc/profile.d/conda.sh 
-cd {self.home_dir}/alcf_kan_inr
-conda activate alcf_kan_inr
+cd {self.home_dir}/kan_inr
+conda activate kan_inr
 
 # Get the number of GPUs
 NUM_GPUS=$(nvidia-smi -L | wc -l)
@@ -405,18 +403,22 @@ echo "Completed at: $(date)"
         except:
             return 0
 
-    def wait_for_slot(self):
+    def wait_for_slot(self, last_submission_failed=False):
         """Wait for a queue slot to become available"""
         while True:
             current_jobs = self.get_queued_jobs()
-            if current_jobs < self.max_queued_jobs:
+            # If last submission failed we wait regardless of current_jobs
+            if current_jobs < self.max_queued_jobs and not last_submission_failed:
                 return
 
             print(
                 f"Queue full ({current_jobs}/{self.max_queued_jobs}). "
-                f"Waiting {self.wait_time} seconds..."
+                f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
             )
             time.sleep(self.wait_time)
+
+            if last_submission_failed:
+                last_submission_failed = False
 
     def run(self):
         """Main execution loop"""
@@ -446,19 +448,11 @@ echo "Completed at: $(date)"
             if not self.dry_run:
                 self.wait_for_slot()
 
-            # Submit job
             success = self.submit_job(run_index, params)
 
-            if success:
-                submitted += 1
-            else:
-                failed += 1
-
-            # Progress update
-            if (submitted + failed) % 10 == 0 or (submitted + failed) == total_runs:
-                print(
-                    f"Progress: {submitted} submitted, {failed} failed out of {total_runs} total"
-                )
+            while not success:  # Retry until successful
+                self.wait_for_slot(last_submission_failed=True)
+                success = self.submit_job(run_index, params)
 
             # Small delay to avoid overwhelming the scheduler
             if not self.dry_run:
@@ -473,20 +467,14 @@ echo "Completed at: $(date)"
 
 # Register the config schema with Hydra as a structured config
 cs = ConfigStore.instance()
-# Store as base schema - this won't conflict with config files
-cs.store(name="submission_schema", node=SubmissionConfig)
+
+# Override schema to interpret "--config-name config" as a SubmissionConfig (not a BenchmarkConfig)
+cs.store(name="config", node=SubmissionConfig)
 
 
 @hydra.main(version_base="1.3", config_path="conf")
-def main(cfg: DictConfig):
+def main(cfg: SubmissionConfig):
     """Main entry point with Hydra configuration"""
-
-    # Merge with our SubmissionConfig defaults
-    submission_defaults = OmegaConf.structured(SubmissionConfig)
-    cfg = OmegaConf.merge(submission_defaults, cfg)
-
-    # Convert to SubmissionConfig for type checking
-    cfg = OmegaConf.to_object(cfg)
 
     # Print configuration if verbose
     if cfg.verbose:
