@@ -168,5 +168,5 @@ logs/
 .vscode/
 
 # Saved models and reconstructions
-saved_reconstructions/
-saved_models/
+reconstructions_saved/
+models_saved/

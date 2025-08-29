@@ -122,220 +122,6 @@ class RunParams:
     zfp_mlp: float
 
 
-# Register configuration schema with Hydra at import time
-cs = ConfigStore.instance()
-cs.store(name="benchmark_schema", node=BenchmarkConfig)
-
-
-def setup_ddp():
-    """
-    Initialize the distributed training environment for multi-GPU training.
-
-    Sets up NCCL backend for GPU communication and configures the process group
-    based on environment variables set by torchrun or mpirun.
-
-    Returns:
-        tuple: (rank, world_size, local_rank) where:
-            - rank: Global rank of this process across all nodes
-            - world_size: Total number of processes
-            - local_rank: Local rank on this node (for GPU assignment)
-    """
-    # Get rank and world size from environment variables (set by torchrun or mpirun)
-    rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-
-    # Set device for this process
-    torch.cuda.set_device(local_rank)
-
-    # Initialize the process group if not already initialized
-    if not dist.is_initialized():
-        dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-    return rank, world_size, local_rank
-
-
-def cleanup_ddp():
-    """
-    Clean up the distributed training environment.
-
-    Properly destroys the process group to free resources and ensure
-    clean shutdown of distributed training.
-    """
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
-@hydra.main(version_base="1.3", config_path="conf")
-def main(cfg: BenchmarkConfig):
-    """
-    Main entry point for the benchmark script.
-
-    Coordinates the entire benchmarking process including:
-    1. Parsing run configurations from params file
-    2. Setting up distributed training if available
-    3. Selecting appropriate run based on job array index
-    4. Training and evaluating the model
-    5. Saving results and optionally the trained model
-
-    Args:
-        cfg: Hydra-managed configuration object
-    """
-    # Parse all possible run configurations from the params file
-    runs_list = parse_run_params(cfg)
-
-    # Check if we should use DDP (multi-GPU training)
-    use_ddp = (
-        torch.cuda.is_available()
-        and torch.cuda.device_count() > 1
-        and "RANK" in os.environ
-    )
-
-    if use_ddp:
-        rank, world_size, local_rank = setup_ddp()
-    else:
-        rank, world_size, local_rank = 0, 1, 0
-
-    # Only print configuration on main process to avoid duplicate output
-    if rank == 0:
-        print("Benchmark Configuration:\n" + OmegaConf.to_yaml(cfg))
-        if use_ddp:
-            print(f"Using DDP with {world_size} GPUs")
-
-    # Select the run parameters based on the job array index (for HPC job arrays)
-    job_array_idx = int(os.environ.get("PBS_ARRAY_INDEX", 0))
-    if rank == 0:
-        print(f"Running job array index: {job_array_idx}")
-    params = runs_list[job_array_idx]
-
-    # Override epochs if specified in config
-    if cfg.epochs is not None:
-        params.epochs = cfg.epochs  # Override epochs if specified in config
-
-    # Find the dataset path based on the dataset name (from the params file keys)
-    home_dir = Path(cfg.home_dir)
-    data_dir = home_dir / cfg.data_path
-    data_path = None
-    if not data_dir.exists():
-        raise FileNotFoundError(f"Data path {data_dir} does not exist.")
-
-    # Search for dataset file matching the dataset name
-    for dataset in os.listdir(data_dir):
-        if dataset.startswith(params.dataset_name):
-            data_path = data_dir / dataset
-            break
-    if data_path is None:
-        raise FileNotFoundError(
-            f"Dataset {params.dataset_name} not found in {cfg.data_path}"
-        )
-
-    # If a ssd_dir is specified, copy data to the SSD for faster I/O
-    if rank == 0 and cfg.ssd_dir is not None:
-        ssd_data_path = Path(cfg.ssd_dir) / data_path.name
-        shutil.copy(data_path, ssd_data_path)
-        data_path = ssd_data_path
-
-    # Set up output directory and file
-    output_dir = home_dir / "results"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.output_filename is None:
-        # Create a unique filename based on the parameter sweeping
-        unique_filename = (
-            "_".join(
-                [
-                    params.dataset_name,
-                    params.network_type,
-                    str(params.log2_hashmap_size),
-                ]
-            )
-            + "_results.csv"
-        )
-        output_path = output_dir / unique_filename
-    else:
-        output_path = output_dir / cfg.output_filename
-
-    # Only write CSV header on rank 0 to avoid race conditions
-    if rank == 0:
-        with open(output_path, "w") as f:
-            f.write(
-                ",".join(
-                    [
-                        # the (ordering of) datapoints collected
-                        "dataset_name",
-                        "data_size",
-                        "inr_size",
-                        "network_type",
-                        "epoch_count",
-                        "num_neurons",
-                        "num_hidden_layers",
-                        "num_levels",
-                        "num_features_per_level",
-                        "per_level_scale",
-                        "log2_hashmap_size",
-                        "base_resolution",
-                        "num_repeats",
-                        "avg_time_per_epoch",
-                        "num_gpus",
-                        "compression_ratio",
-                        "avg_psnr",
-                        "avg_ssim",
-                        "avg_mse",
-                    ]
-                )
-            )
-
-    # Check if we should save the model based on the save_mode
-    should_save = False
-    if cfg.save_mode is not None:
-
-        # Find the target hashmap size based on save mode
-        if cfg.save_mode == "largest":
-            specific_hashmap_size = max(
-                run.log2_hashmap_size
-                for run in runs_list
-                if run.dataset_name == params.dataset_name
-            )
-        elif cfg.save_mode == "smallest":
-            specific_hashmap_size = min(
-                run.log2_hashmap_size
-                for run in runs_list
-                if run.dataset_name == params.dataset_name
-            )
-        elif cfg.save_mode.isdigit():
-            specific_hashmap_size = int(cfg.save_mode)
-        else:
-            raise ValueError(
-                f"Invalid save_mode: {cfg.save_mode}. Must be 'largest', 'smallest', or an integer."
-            )
-
-        should_save = params.log2_hashmap_size == specific_hashmap_size
-
-    if rank == 0:
-        start_time = time()
-        print(f"Running w/ parameters:")
-        pprint(params)
-        print("Saving INR:", should_save)
-
-    try:
-        # Run the actual benchmark
-        run_benchmark(
-            data_path,
-            output_path,
-            params,
-            cfg,
-            should_save,
-            rank,
-            world_size,
-            local_rank,
-        )
-    finally:
-        # Ensure cleanup happens even if errors occur
-        cleanup_ddp()
-        end_time = time()
-        if rank == 0:
-            print(f"Total time: {end_time - start_time:.2f} seconds")
-
-
 def run_benchmark(
     data_path: Path,
     output_path: Path,
@@ -880,7 +666,7 @@ def save(
 
     if save_model:
         # Save the INR model weights
-        save_path = save_dir / "saved_models" / f"{inr_name}.pt"
+        save_path = save_dir / "models_saved" / f"{inr_name}.pt"
         save_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(model.state_dict(), save_path)
         print(f"Model saved to {save_path}")
@@ -891,7 +677,7 @@ def save(
         type_str = np.dtype(save_type).name
         reconst_path = (
             save_dir
-            / "saved_reconstructions"
+            / "reconstructions_saved"
             / f"{inr_name}_{shape_str}_{type_str}.raw"
         )
         reconst_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1257,6 +1043,220 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
         )
 
     return runs
+
+
+def setup_ddp():
+    """
+    Initialize the distributed training environment for multi-GPU training.
+
+    Sets up NCCL backend for GPU communication and configures the process group
+    based on environment variables set by torchrun or mpirun.
+
+    Returns:
+        tuple: (rank, world_size, local_rank) where:
+            - rank: Global rank of this process across all nodes
+            - world_size: Total number of processes
+            - local_rank: Local rank on this node (for GPU assignment)
+    """
+    # Get rank and world size from environment variables (set by torchrun or mpirun)
+    rank = int(os.environ.get("RANK", 0))
+    world_size = int(os.environ.get("WORLD_SIZE", 1))
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+    # Set device for this process
+    torch.cuda.set_device(local_rank)
+
+    # Initialize the process group if not already initialized
+    if not dist.is_initialized():
+        dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+    return rank, world_size, local_rank
+
+
+def cleanup_ddp():
+    """
+    Clean up the distributed training environment.
+
+    Properly destroys the process group to free resources and ensure
+    clean shutdown of distributed training.
+    """
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+
+# Register configuration schema with Hydra at import time
+cs = ConfigStore.instance()
+cs.store(name="benchmark_schema", node=BenchmarkConfig)
+
+
+@hydra.main(version_base="1.3", config_path="conf")
+def main(cfg: BenchmarkConfig):
+    """
+    Main entry point for the benchmark script.
+
+    Coordinates the entire benchmarking process including:
+    1. Parsing run configurations from params file
+    2. Setting up distributed training if available
+    3. Selecting appropriate run based on job array index
+    4. Training and evaluating the model
+    5. Saving results and optionally the trained model
+
+    Args:
+        cfg: Hydra-managed configuration object
+    """
+    # Parse all possible run configurations from the params file
+    runs_list = parse_run_params(cfg)
+
+    # Check if we should use DDP (multi-GPU training)
+    use_ddp = (
+        torch.cuda.is_available()
+        and torch.cuda.device_count() > 1
+        and "RANK" in os.environ
+    )
+
+    if use_ddp:
+        rank, world_size, local_rank = setup_ddp()
+    else:
+        rank, world_size, local_rank = 0, 1, 0
+
+    # Only print configuration on main process to avoid duplicate output
+    if rank == 0:
+        print("Benchmark Configuration:\n" + OmegaConf.to_yaml(cfg))
+        if use_ddp:
+            print(f"Using DDP with {world_size} GPUs")
+
+    # Select the run parameters based on the job array index (for HPC job arrays)
+    job_array_idx = int(os.environ.get("PBS_ARRAY_INDEX", 0))
+    if rank == 0:
+        print(f"Running job array index: {job_array_idx}")
+    params = runs_list[job_array_idx]
+
+    # Override epochs if specified in config
+    if cfg.epochs is not None:
+        params.epochs = cfg.epochs  # Override epochs if specified in config
+
+    # Find the dataset path based on the dataset name (from the params file keys)
+    home_dir = Path(cfg.home_dir)
+    data_dir = home_dir / cfg.data_path
+    data_path = None
+    if not data_dir.exists():
+        raise FileNotFoundError(f"Data path {data_dir} does not exist.")
+
+    # Search for dataset file matching the dataset name
+    for dataset in os.listdir(data_dir):
+        if dataset.startswith(params.dataset_name):
+            data_path = data_dir / dataset
+            break
+    if data_path is None:
+        raise FileNotFoundError(
+            f"Dataset {params.dataset_name} not found in {cfg.data_path}"
+        )
+
+    # If a ssd_dir is specified, copy data to the SSD for faster I/O
+    if rank == 0 and cfg.ssd_dir is not None:
+        ssd_data_path = Path(cfg.ssd_dir) / data_path.name
+        shutil.copy(data_path, ssd_data_path)
+        data_path = ssd_data_path
+
+    # Set up output directory and file
+    output_dir = home_dir / "results"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if cfg.output_filename is None:
+        # Create a unique filename based on the parameter sweeping
+        unique_filename = (
+            "_".join(
+                [
+                    params.dataset_name,
+                    params.network_type,
+                    str(params.log2_hashmap_size),
+                ]
+            )
+            + "_results.csv"
+        )
+        output_path = output_dir / unique_filename
+    else:
+        output_path = output_dir / cfg.output_filename
+
+    # Only write CSV header on rank 0 to avoid race conditions
+    if rank == 0:
+        with open(output_path, "w") as f:
+            f.write(
+                ",".join(
+                    [
+                        # the (ordering of) datapoints collected
+                        "dataset_name",
+                        "data_size",
+                        "inr_size",
+                        "network_type",
+                        "epoch_count",
+                        "num_neurons",
+                        "num_hidden_layers",
+                        "num_levels",
+                        "num_features_per_level",
+                        "per_level_scale",
+                        "log2_hashmap_size",
+                        "base_resolution",
+                        "num_repeats",
+                        "avg_time_per_epoch",
+                        "num_gpus",
+                        "compression_ratio",
+                        "avg_psnr",
+                        "avg_ssim",
+                        "avg_mse",
+                    ]
+                )
+            )
+
+    # Check if we should save the model based on the save_mode
+    should_save = False
+    if cfg.save_mode is not None:
+
+        # Find the target hashmap size based on save mode
+        if cfg.save_mode == "largest":
+            specific_hashmap_size = max(
+                run.log2_hashmap_size
+                for run in runs_list
+                if run.dataset_name == params.dataset_name
+            )
+        elif cfg.save_mode == "smallest":
+            specific_hashmap_size = min(
+                run.log2_hashmap_size
+                for run in runs_list
+                if run.dataset_name == params.dataset_name
+            )
+        elif cfg.save_mode.isdigit():
+            specific_hashmap_size = int(cfg.save_mode)
+        else:
+            raise ValueError(
+                f"Invalid save_mode: {cfg.save_mode}. Must be 'largest', 'smallest', or an integer."
+            )
+
+        should_save = params.log2_hashmap_size == specific_hashmap_size
+
+    if rank == 0:
+        start_time = time()
+        print(f"Running w/ parameters:")
+        pprint(params)
+        print("Saving INR:", should_save)
+
+    try:
+        # Run the actual benchmark
+        run_benchmark(
+            data_path,
+            output_path,
+            params,
+            cfg,
+            should_save,
+            rank,
+            world_size,
+            local_rank,
+        )
+    finally:
+        # Ensure cleanup happens even if errors occur
+        cleanup_ddp()
+        end_time = time()
+        if rank == 0:
+            print(f"Total time: {(end_time - start_time) / 60:.2f} minutes")
 
 
 if __name__ == "__main__":
