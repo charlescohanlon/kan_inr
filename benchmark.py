@@ -1169,6 +1169,7 @@ def main(cfg: BenchmarkConfig):
                     params.dataset_name,
                     params.network_type,
                     str(params.log2_hashmap_size),
+                    str(params.n_levels),
                 ]
             )
             + "_results.csv"
@@ -1205,6 +1206,7 @@ def main(cfg: BenchmarkConfig):
                         "avg_mse",
                     ]
                 )
+                + "\n"
             )
 
     # Check if we should save the model based on the save_mode
