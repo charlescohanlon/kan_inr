@@ -403,12 +403,11 @@ echo "Completed at: $(date)"
         except:
             return 0
 
-    def wait_for_slot(self, last_submission_failed=False):
+    def wait_for_slot(self, must_wait=False):
         """Wait for a queue slot to become available"""
         while True:
             current_jobs = self.get_queued_jobs()
-            # If last submission failed we wait regardless of current_jobs
-            if current_jobs < self.max_queued_jobs and not last_submission_failed:
+            if current_jobs < self.max_queued_jobs and not must_wait:
                 return
 
             print(
@@ -416,9 +415,7 @@ echo "Completed at: $(date)"
                 f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
             )
             time.sleep(self.wait_time)
-
-            if last_submission_failed:
-                last_submission_failed = False
+            must_wait = False  # Only force wait once
 
     def run(self):
         """Main execution loop"""
@@ -444,18 +441,15 @@ echo "Completed at: $(date)"
 
         # Submit jobs
         for run_index, params in enumerate(runs_list):
-            # Wait for available slot
             if not self.dry_run:
-                self.wait_for_slot()
+                self.wait_for_slot()  # Check if max_queued_jobs is reached
 
-            success = self.submit_job(run_index, params)
+                success = False
+                while not success:  # Retry until successful
+                    success = self.submit_job(run_index, params)
+                    self.wait_for_slot(must_wait=not success)
 
-            while not success:  # Retry until successful
-                self.wait_for_slot(last_submission_failed=True)
-                success = self.submit_job(run_index, params)
-
-            # Small delay to avoid overwhelming the scheduler
-            if not self.dry_run:
+                # Small delay to avoid overwhelming the scheduler
                 time.sleep(1)
 
         # Final summary

@@ -18,8 +18,6 @@ conda activate kan_inr
 NUM_GPUS=$(nvidia-smi -L | wc -l)
 echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 
-export PBS_ARRAY_INDEX=12 # Change me
-
 # Use the benchmark.py program to fit an INR, then decompress and save the result
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
     benchmark.py -cn config \
