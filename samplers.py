@@ -94,7 +94,11 @@ class VolumeData(VolumeDesc):
         else:
             dmin, dmax = minmax
         self.minmax = [dmin, dmax]
-        self.data = (self.data - dmin) * (1.0 / (dmax - dmin))
+
+        # Normalize in-place to save memory
+        self.data.sub_(dmin)
+        self.data.div_(dmax - dmin)
+
         self.data = torch.clamp(self.data, min=0.0, max=1.0)
         if transform:  # Apply application defined transform (optional)
             self.data = transform(self.data)
