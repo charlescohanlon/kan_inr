@@ -20,5 +20,4 @@ echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 
 # Use the benchmark.py program to fit an INR, then decompress and save the result
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
-    benchmark.py -cn config \
-        dataset="magnetic_reconnection" \
+    benchmark.py -cn config params_file=params

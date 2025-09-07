@@ -5,14 +5,14 @@ defaults:
 home_dir: "/grand/insitu/cohanlon"
 ssd_dir: "/raid/scratch"
 
-# relative to home directory
-params_file: "kan_inr/params.json"
+# relative to home_dir
 data_path: "datasets/raw"
+params_path: "kan_inr/params"
 
 enable_pbar: False    # progress bar is written to error file on PBS
-repeats: 5           # number of times to repeat each experiment
+repeats: 1            # number of times to repeat each experiment
 
-save_mode: "largest" # save smallest or largest hashtable size for a given dataset INR
+save_mode: null # save smallest or largest hashtable size for a given dataset INR
 
 # Model(s) to benchmark
-network_types: ["kan", "mlp"]
+network_types: ["fkan", "mlp"]

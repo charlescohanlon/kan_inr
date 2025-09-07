@@ -54,13 +54,16 @@ kan_inr/
 ├── run_scripts/                        # Utility scripts
 │   ├── debug.sh                        # Debug script
 │   └── reconst.sh                      # Reconstruction example
+├── params/                             # Run parameter files
+│   ├── debug.json                      # Debug run parameters
+│   ├── original.json                   # Qi's original run parameters
+│   └── params.json                     # Default run parameters
 ├── benchmark.py                        # Main benchmarking script
 ├── demo.py                             # Simple demonstration script
 ├── fastkan.py                          # KAN implementation
 ├── networks.py                         # Network architectures
 ├── samplers.py                         # Data sampling utilities
 ├── submit_jobs.py                      # HPC job submission manager
-├── params.json                         # Benchmark parameters
 ├── params_debug.json                   # Debug parameters
 ├── vis.ipynb                           # Visualization notebook
 ├── requirements.txt                    # Package dependencies

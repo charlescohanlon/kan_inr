@@ -23,7 +23,7 @@ echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
     benchmark.py -cn config \
         repeats=1 \
-        params_file="kan_inr/params.json" \
+        params_file="original" \
         dataset="magnetic_reconnection" \
         hashmap_size=16 \
         enable_pbar=True

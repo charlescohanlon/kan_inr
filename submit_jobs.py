@@ -8,8 +8,8 @@ import sys
 import subprocess
 import time
 from pathlib import Path
-from typing import Tuple
-from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, fields
 
 import hydra
 from hydra.core.config_store import ConfigStore
@@ -29,6 +29,7 @@ class SubmissionConfig(BenchmarkConfig):
     wait_time: int = 10 * 60  # seconds
     dry_run: bool = False
     verbose: bool = False
+    pbs_array_index_subset: Optional[List[int]] = None
 
 
 # Dataset sizes parsed from filenames for quick reference
@@ -98,6 +99,8 @@ class JobSubmissionManager:
         self.verbose = cfg.verbose
         self.home_dir = Path(cfg.home_dir)
         self.log_dir = self.home_dir / "kan_inr" / "logs"
+        if self.cfg.dataset is not None:
+            self.log_dir /= self.cfg.dataset
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
     def get_dataset_info(self, dataset_name: str) -> Tuple[Tuple[int, int, int], str]:
@@ -225,6 +228,10 @@ class JobSubmissionManager:
         memory_per_gpu = 35  # Conservative limit (leave headroom)
         num_gpus = max(1, int(np.ceil(total_memory_gb / memory_per_gpu)))
 
+        total_time *= 1.5
+        if "kan" in params.network_type:
+            total_time *= 10  # KAN models are slower
+
         seconds_per_hour = 3600
         if total_time > seconds_per_hour * 2:
             num_gpus = max(2, num_gpus)
@@ -238,9 +245,6 @@ class JobSubmissionManager:
             # Assume 80% scaling efficiency per additional GPU
             scaling_factor = 1 + (num_gpus - 1) * 0.8
             total_time = total_time / scaling_factor
-
-        # Add safety margin for queue wait times, I/O, etc.
-        total_time *= 1.3
 
         # Convert to walltime string with appropriate padding
         hours = int(total_time // 3600)
@@ -285,21 +289,36 @@ class JobSubmissionManager:
         return num_gpus, walltime
 
     def generate_pbs_script(
-        self, run_index: int, params: RunParams, num_gpus: int, walltime: str
+        self,
+        run_index: int,
+        params: RunParams,
+        num_gpus: int,
+        walltime: str,
     ) -> str:
         """Generate a customized PBS script for this specific job"""
-
-        # Determine system based on GPU count (sophia for <=4, polaris for >4)
-        system = "sophia" if num_gpus <= 4 else "polaris"
-
         # Generate a descriptive job name (PBS limits to 15 chars)
-        job_name = f"{params.network_type[:3]}_{params.dataset_name[:8]}_h{params.log2_hashmap_size}"
+        job_name = f"{params.network_type[:1]}_{params.dataset_name[:3]}_{run_index}"
 
+        if params.log2_hashmap_size > 0:
+            hashmap_size = "2^" + str(params.log2_hashmap_size)
+        else:
+            hashmap_size = "N/A"
+
+        # Cast SubmissionConfig superclass to BenchmarkConfig for argument parsing
+        submission_fields = {f.name for f in fields(SubmissionConfig)}
+        benchmark_fields = {f.name for f in fields(BenchmarkConfig)}
+        override_args = []
+        for key in submission_fields:
+            # If key exists in BenchmarkConfig and is not None, add to overrides
+            if key in benchmark_fields and self.cfg[key] is not None:
+                override_args.append(f'{key}={str(self.cfg[key]).replace(" ", "")}')
+
+        override_str = " ".join(override_args).replace("'", '"')
         script = f"""#!/bin/bash
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
 #PBS -q by-gpu
-#PBS -l select=1:ncpus={num_gpus*8}:gputype=A100:system={system}
+#PBS -l select=1:ncpus={num_gpus*8}:gputype=A100:system=sophia
 #PBS -l walltime={walltime}
 #PBS -l filesystems=home:grand
 #PBS -N {job_name}
@@ -324,12 +343,12 @@ echo "  Job Array Index: $PBS_ARRAY_INDEX"
 echo "  Number of GPUs detected: $NUM_GPUS"
 echo "  Requested GPUs: {num_gpus}"
 echo "  Walltime: {walltime}"
-echo "  System: {system}"
+echo "  System: sophia"
 echo "========================================="
 echo "Model Configuration:"
 echo "  Model type: {params.network_type}"
 echo "  Dataset: {params.dataset_name}"
-echo "  Hashmap size: 2^{params.log2_hashmap_size}"
+echo "  Hashmap size: {hashmap_size}"
 echo "  Epochs: {params.epochs}"
 echo "  Hidden layers: {params.n_hidden_layers}"
 echo "  Neurons per layer: {params.n_neurons}"
@@ -339,8 +358,7 @@ echo "Starting at: $(date)"
 
 # Run the benchmark
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \\
-    benchmark.py -cn config \\
-        dataset={params.dataset_name}
+    benchmark.py -cn config {override_str}
 
 echo "Completed at: $(date)"
 """
@@ -441,14 +459,21 @@ echo "Completed at: $(date)"
 
         # Submit jobs
         for run_index, params in enumerate(runs_list):
+            if self.cfg.pbs_array_index_subset is not None:
+                if run_index not in self.cfg.pbs_array_index_subset:
+                    if self.verbose:
+                        print(f"Skipping job {run_index} (not in subset)")
+                    continue
             if not self.dry_run:
                 self.wait_for_slot()  # Check if max_queued_jobs is reached
 
-                success = False
-                while not success:  # Retry until successful
-                    success = self.submit_job(run_index, params)
+            success = False
+            while not success:  # Retry until successful
+                success = self.submit_job(run_index, params)
+                if not self.dry_run:
                     self.wait_for_slot(must_wait=not success)
 
+            if not self.dry_run:
                 # Small delay to avoid overwhelming the scheduler
                 time.sleep(1)
 

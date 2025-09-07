@@ -99,7 +99,7 @@ class VolumeData(VolumeDesc):
         self.data.sub_(dmin)
         self.data.div_(dmax - dmin)
 
-        self.data = torch.clamp(self.data, min=0.0, max=1.0)
+        self.data.clamp_(min=0.0, max=1.0)
         if transform:  # Apply application defined transform (optional)
             self.data = transform(self.data)
 
@@ -204,7 +204,10 @@ class VolumeSampler(VolumeDesc):
 
     def load_from_file(self, *args, **kwargs):
         self.gt = VolumeData(
-            dims=self._dims, dtype=self._type, numfields=self.numfields
+            dims=self._dims,
+            dtype=self._type,
+            numfields=self.numfields,
+            device=self.device,
         )
         self.gt.from_file(*args, **kwargs)
 
