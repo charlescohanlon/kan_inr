@@ -4,6 +4,7 @@
 #PBS -q by-gpu
 #PBS -l select=1:ncpus=8:gputype=A100:system=sophia
 #PBS -l walltime=00:30:00
+#PBS -l place=excl
 #PBS -l filesystems=home:grand
 #PBS -o /grand/insitu/cohanlon/kan_inr/logs/
 #PBS -e /grand/insitu/cohanlon/kan_inr/logs/
