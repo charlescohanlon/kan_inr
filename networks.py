@@ -1,3 +1,4 @@
+from functools import partial
 import warnings
 
 import torch
@@ -5,7 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import numpy as np
-from fastkan import FastKAN
 
 
 if torch.cuda.is_available():
@@ -421,6 +421,7 @@ class INR_Base(nn.Module):
         activation="ReLU",
         output_activation="None",
         suppress_encoder_nan=False,
+        kan_params=None,
     ):
         super(INR_Base, self).__init__()
 
@@ -430,14 +431,43 @@ class INR_Base(nn.Module):
 
         self.suppress_encoder_nan = suppress_encoder_nan
         ENCODER = HashEmbedderNative if native_encoder else HashEmbedderTCNN
-        if network_type.lower() == "mlp":
+        if self.network_type == "mlp":
             NETWORK = MLP_Native if native_network else MLP_TCNN
-        elif network_type.lower() == "kan":
-            NETWORK = FKAN_Native
+        elif self.network_type == "ekan":
+            if kan_params is not None:
+                NETWORK = partial(
+                    EKAN_Native,
+                    grid_size=kan_params.grid_size,
+                )
+            else:
+                NETWORK = EKAN_Native
+        elif self.network_type == "fkan":
+            if kan_params is not None:
+                NETWORK = partial(
+                    FKAN_Native,
+                    grid_radius=kan_params.grid_radius,
+                    num_grids=kan_params.num_grids,
+                )
+            else:
+                NETWORK = FKAN_Native
         else:
             raise ValueError(f"Unsupported network type {network_type}")
 
-        n_enc_out = n_levels * n_features_per_level
+        if log2_hashmap_size > 0:
+            n_enc_out = n_levels * n_features_per_level
+            self.encoder = ENCODER(
+                n_pos_dims=n_input_dims,
+                n_levels=n_levels,
+                n_features_per_level=n_features_per_level,
+                log2_hashmap_size=log2_hashmap_size,
+                base_resolution=base_resolution,
+                per_level_scale=per_level_scale,
+            )
+            self.encoding_config = self.encoder.encoding_config
+        else:
+            n_enc_out = n_input_dims
+            self.encoder = None
+            self.encoding_config = None
 
         self.network = NETWORK(
             n_input_dims=n_enc_out,
@@ -448,23 +478,16 @@ class INR_Base(nn.Module):
             output_activation=output_activation,
         )
 
-        self.encoder = ENCODER(
-            n_pos_dims=n_input_dims,
-            n_levels=n_levels,
-            n_features_per_level=n_features_per_level,
-            log2_hashmap_size=log2_hashmap_size,
-            base_resolution=base_resolution,
-            per_level_scale=per_level_scale,
-        )
-
-        self.encoding_config = self.encoder.encoding_config
         self.network_config = self.network.network_config
 
     def forward(self, x):
-        h = self.encoder(x).float()
+        if self.encoder is not None:
+            x = self.encoder(x).float()
+
         if self.suppress_encoder_nan:
-            h = torch.nan_to_num(h)
-        return self.network(h)
+            x = torch.nan_to_num(x)
+
+        return self.network(x)
 
 
 class INR_TCNN(nn.Module):
@@ -539,6 +562,10 @@ class FKAN_Native(torch.nn.Module):
         n_neurons=64,
         activation="SiLU",
         output_activation="None",
+        grid_radius=1.0,
+        num_grids=8,
+        use_base_update=True,
+        base_activation=F.silu,
     ):
         super(FKAN_Native, self).__init__()
 
@@ -560,20 +587,71 @@ class FKAN_Native(torch.nn.Module):
         self.network_config = network_config
 
         assert n_hidden_layers >= 0, "expect at least one hidden layer"
-
+        grid_min = -grid_radius
+        grid_max = grid_radius
         layers_hidden = [n_input_dims] + [n_neurons] * n_hidden_layers + [n_output_dims]
+
+        from fastkan import FastKAN
+
         self.fkan = FastKAN(
             layers_hidden=layers_hidden,
-            grid_min=-1.0,
-            grid_max=1.0,
-            num_grids=8,
-            use_base_update=True,
-            base_activation=F.silu,
-            spline_weight_init_scale=0.1,
+            grid_min=grid_min,
+            grid_max=grid_max,
+            num_grids=num_grids,
+            use_base_update=use_base_update,
+            base_activation=base_activation,
         )
 
     def forward(self, x):
         return self.fkan(x)
+
+
+class EKAN_Native(torch.nn.Module):
+    def __init__(
+        self,
+        n_input_dims=3,
+        n_output_dims=1,
+        n_hidden_layers=3,
+        n_neurons=64,
+        activation="SiLU",
+        output_activation="None",
+        grid_size=5,
+        use_base_update=True,
+        base_activation=F.silu,
+    ):
+        super(EKAN_Native, self).__init__()
+
+        self.n_input_dims = n_input_dims
+        self.n_output_dims = n_output_dims
+
+        network_config = {
+            "otype": "FastKAN",
+            "activation": activation,
+            "output_activation": output_activation,
+            "n_neurons": n_neurons,
+            "n_hidden_layers": n_hidden_layers,
+            "feedback_alignment": False,
+        }
+
+        self.n_hidden_layers = n_hidden_layers
+        self.n_neurons = n_neurons
+
+        self.network_config = network_config
+
+        assert n_hidden_layers >= 0, "expect at least one hidden layer"
+        layers_hidden = [n_input_dims] + [n_neurons] * n_hidden_layers + [n_output_dims]
+
+        from efficient_kan import KAN
+
+        self.ekan = KAN(
+            layers_hidden=layers_hidden,
+            grid_size=grid_size,
+            use_base_update=use_base_update,
+            base_activation=base_activation,
+        )
+
+    def forward(self, x):
+        return self.ekan(x)
 
 
 def coherent_prime_hash(coords, log2_hashmap_size=0):

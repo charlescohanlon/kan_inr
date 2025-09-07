@@ -6,10 +6,11 @@ representations on volumetric data, supporting both single-GPU and multi-GPU
 distributed training via PyTorch's DistributedDataParallel (DDP).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 import gc
 from typing import List, Optional, Tuple
 from pathlib import Path
+from uuid import uuid4
 import hydra
 from hydra.core.config_store import ConfigStore
 import numpy as np
@@ -20,11 +21,7 @@ import math
 
 import torch
 import torch.nn as nn
-from torchmetrics.functional import mean_squared_error as mse_metric
-from torchmetrics.functional.image import peak_signal_noise_ratio as psnr_metric
-from torchmetrics.functional.image import (
-    structural_similarity_index_measure as ssim_metric,
-)
+from torchmetrics.functional.image import structural_similarity_index_measure
 
 import os
 import shutil
@@ -66,22 +63,43 @@ class BenchmarkConfig:
         hashmap_size: Filter to only use this specific log2 hashmap size
         epochs: Override epochs for all runs (uses params_file value if None)
         ssd_dir: Optional SSD directory for faster I/O during training
+        log2_hashmap_size_step: Step size for sweeping log2 hashmap sizes
     """
 
     params_file: str
     network_types: List[str]
     home_dir: str
     data_path: str
+    params_path: str = "kan_inr/params"
     batch_size: Optional[int] = None
     output_filename: Optional[str] = None
     enable_pbar: bool = True
     repeats: int = 1
     save_mode: Optional[str] = None
-    safety_margin: float = 0.80
+    safety_margin: float = 0.75
     dataset: Optional[str] = None
     hashmap_size: Optional[int] = None
     epochs: Optional[int] = None
     ssd_dir: Optional[str] = None
+    log2_hashmap_size_step: int = 1
+
+
+@dataclass
+class KANParams:
+    """
+    Parameters specific to KAN networks.
+
+    Attributes:
+        grid_radius: Initial grid radius for KAN (can also be a list of two bounds)
+        grid_radius_step: Step size for grid radius adjustment
+        num_grids: Number of grids in KAN (can also be a list of two bounds)
+        num_grids_step: Step size for num_grids adjustment
+    """
+
+    grid_radius: float = 1.0
+    grid_radius_step: float = 1.0
+    num_grids: int = 8
+    num_grids_step: int = 1
 
 
 @dataclass
@@ -100,10 +118,11 @@ class RunParams:
         n_levels: Number of hash table levels (for multi-resolution encoding)
         n_features_per_level: Features per hash table level
         per_level_scale: Scale factor between consecutive levels
-        log2_hashmap_size: Log2 of the hash table size
+        log2_hashmap_size: Log2 of the hash table size (can also be list of two bounds)
         base_resolution: Base resolution for the hash encoding
         zfp_enc: ZFP compression parameter for encoder (unused in current implementation)
         zfp_mlp: ZFP compression parameter for MLP (unused in current implementation)
+        kan_params: Optional dictionary of KAN-specific parameters
     """
 
     dataset_name: str
@@ -120,6 +139,7 @@ class RunParams:
     base_resolution: str
     zfp_enc: float
     zfp_mlp: float
+    kan_params: Optional[KANParams] = None
 
 
 def run_benchmark(
@@ -161,11 +181,10 @@ def run_benchmark(
 
     # Parse dataset information from filename
     _, data_shape, data_type = parse_filename(data_path)
-    data = np.fromfile(data_path, dtype=data_type)
 
     # Prepare data and sampler for coordinate-based training
     sampler = VolumeSampler(data_shape, data_type, device)
-    sampler.load_from_ndarray(data)
+    sampler.load_from_file(filename=data_path)
 
     # Use bounding boxes in 3D to partition sampling among ranks for DDP
     # Each rank will train on a different spatial region of the volume
@@ -176,7 +195,7 @@ def run_benchmark(
     # Determine whether to use native PyTorch implementations
     # KAN networks and CPU training require native implementations
     native_encoder = device.type == "cpu"
-    native_network = device.type == "cpu" or params.network_type != "mlp"
+    native_network = device.type == "cpu" or params.network_type.lower() != "mlp"
 
     # Initialize accumulators for metrics across multiple runs
     cum_psnr, cum_ssim, cum_mse = 0.0, 0.0, 0.0
@@ -201,6 +220,7 @@ def run_benchmark(
             log2_hashmap_size=params.log2_hashmap_size,
             base_resolution=params.base_resolution,
             per_level_scale=params.per_level_scale,
+            kan_params=params.kan_params,
         )
         model.to(device, non_blocking=True)
 
@@ -340,10 +360,50 @@ def run_benchmark(
         avg_time_per_epoch = sum(durations) / len(durations)
         num_gpus = torch.cuda.device_count()
 
+        if params.kan_params is not None:
+            kan_grid_radius = params.kan_params.grid_radius
+            kan_grid_radius_step = params.kan_params.grid_radius_step
+            kan_num_grids = params.kan_params.num_grids
+            kan_num_grids_step = params.kan_params.num_grids_step
+        else:
+            kan_grid_radius = None
+            kan_grid_radius_step = None
+            kan_num_grids = None
+            kan_num_grids_step = None
+
         # Write results to CSV
         with open(output_path, "a") as f:
             f.write(
-                ",".join(
+                ",".join(  # TODO: add batch size to datapoints
+                    [
+                        # the (ordering of) datapoints collected
+                        "dataset_name",
+                        "data_size",
+                        "inr_size",
+                        "network_type",
+                        "epoch_count",
+                        "num_neurons",
+                        "num_hidden_layers",
+                        "num_levels",
+                        "num_features_per_level",
+                        "per_level_scale",
+                        "log2_hashmap_size",
+                        "base_resolution",
+                        "num_repeats",
+                        "avg_time_per_epoch",
+                        "num_gpus",
+                        "compression_ratio",
+                        "kan_grid_radius",
+                        "kan_grid_radius_step",
+                        "kan_num_grids",
+                        "kan_num_grids_step",
+                        "avg_psnr",
+                        "avg_ssim",
+                        "avg_mse",
+                    ]
+                )
+                + "\n"
+                + ",".join(
                     map(
                         str,
                         [
@@ -364,6 +424,10 @@ def run_benchmark(
                             avg_time_per_epoch,
                             num_gpus,
                             compression_ratio,
+                            kan_grid_radius,
+                            kan_grid_radius_step,
+                            kan_num_grids,
+                            kan_num_grids_step,
                             avg_psnr,
                             avg_ssim,
                             avg_mse,
@@ -375,9 +439,10 @@ def run_benchmark(
         # Save model and reconstruction if requested
         if should_save:
             # Un-normalize data before saving
+            data_min, data_max = sampler.gt.minmax
             if 0 <= reconst_data.min() and reconst_data.max() <= 1.0:
                 reconst_data = (  # un-normalize data (and move to cpu) before saving
-                    reconst_data.cpu() * (data.max() - data.min()) + data.min()
+                    reconst_data.cpu() * (data_max - data_min) + data_min
                 )
             inr_name = "_".join(  # made up of parameters being swept
                 [
@@ -394,6 +459,19 @@ def run_benchmark(
                 save_type=data_type,
                 save_shape=data_shape,
             )
+
+
+def mse2psnr(x):
+    """Convert MSE to PSNR (Peak Signal-to-Noise Ratio)."""
+    if torch.is_tensor(x):
+        return -10.0 * torch.log(x) / log(10.0)
+
+    return -10.0 * np.log(x) / log(10.0)
+
+
+def mse_loss(x, y):
+    """Calculate MSE loss between predictions and targets."""
+    return torch.nn.MSELoss()(x, y) if torch.is_tensor(x) else np.mean((x - y) ** 2)
 
 
 def train(
@@ -423,20 +501,6 @@ def train(
         tuple: (final_loss, final_psnr, epoch_duration) metrics from the epoch
     """
     is_main_process = rank == 0
-
-    def mse2psnr(x, data_range=1.0):
-        """Convert MSE to PSNR (Peak Signal-to-Noise Ratio)."""
-        x = x / data_range * data_range
-        return (
-            (-10.0 * torch.log(x) / log(10.0))
-            if torch.is_tensor(x)
-            else (-10.0 * np.log(x) / log(10.0))
-        )
-
-    def mse_loss(x, y):
-        """Calculate MSE loss between predictions and targets."""
-        return torch.nn.MSELoss()(x, y) if torch.is_tensor(x) else np.mean((x - y) ** 2)
-
     num_voxels = sampler.numvoxels
 
     # Calculate number of steps for approximately one epoch
@@ -572,9 +636,10 @@ def reconstruct(
             torch.cuda.empty_cache()
 
     # Combine all batches and reshape to volume
-    reconst_data = torch.cat(reconst_list, dim=0).reshape(data_shape).to(device)
-    # Clamp to valid range [0, 1]
-    reconst_data = torch.clamp(reconst_data, 0.0, 1.0).contiguous()
+    reconst_data = (
+        torch.cat(reconst_list, dim=0).reshape(data_shape).to(device).contiguous()
+    )
+    reconst_data.clamp_(0.0, 1.0)  # Clamp to valid range [0, 1]
     return reconst_data
 
 
@@ -587,6 +652,8 @@ def compute_metrics(
 
     Processes the volume slice-by-slice for numerical stability with large 3D volumes.
     All input data must be normalized to [0, 1] range.
+
+    NOTE: ssim metric is computed slice-by-slice along the z-axis and then averaged.
 
     Args:
         gt_data: Ground truth volume tensor in [0, 1] range
@@ -609,31 +676,25 @@ def compute_metrics(
     if len(gt_data.shape) != 3:
         raise ValueError("Metrics computation only supports 3D volumes")
 
-    # Process metrics slice-by-slice (more stable for 3D volumes)
-    psnr_values = []
-    mse_values = []
-    ssim_values = []
+    mse = mse_loss(reconst_data, gt_data)
+    psnr = mse2psnr(mse)
 
-    # Iterate through z-dimension slices
+    # Compute SSIM slice-by-slice
+    ssim_values = []
     num_slices = gt_data.shape[2]
     for i in trange(num_slices, disable=not enable_pbar):
 
-        # Extract 2D slices and add batch/channel dimensions for metrics
-        # Shape: (1, 1, H, W)
+        # Shape: (1, 1, X, Y), Z axis is sliced
         gt_slice = gt_data[:, :, i].unsqueeze(0).unsqueeze(0)
         reconst_slice = reconst_data[:, :, i].unsqueeze(0).unsqueeze(0)
 
-        # Calculate metrics for this slice
-        psnr_values.append(psnr_metric(reconst_slice, gt_slice, data_range=1.0))
-        mse_values.append(mse_metric(reconst_slice, gt_slice))
-        ssim_values.append(ssim_metric(reconst_slice, gt_slice, data_range=1.0))
+        ssim_values.append(
+            structural_similarity_index_measure(reconst_slice, gt_slice, data_range=1.0)
+        )
 
-    # Average the metrics across all slices
-    psnr = torch.stack(psnr_values).mean().item()
-    mse = torch.stack(mse_values).mean().item()
-    ssim = torch.stack(ssim_values).mean().item()
+    avg_ssim = torch.stack(ssim_values).mean()
 
-    return psnr, mse, ssim
+    return psnr.item(), avg_ssim.item(), mse.item()
 
 
 @torch.no_grad()
@@ -837,7 +898,7 @@ def calculate_batch_size(
                 raise e
 
     # KAN networks need more memory headroom
-    if model.network_type == "kan":
+    if model.network_type.lower() == "kan":
         safety_margin *= 0.75
 
     # Apply safety margin to avoid occasional OOM during actual training
@@ -978,17 +1039,63 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
         ValueError: If no valid runs are found with the specified filters
     """
     home_dir = Path(cfg.home_dir)
-    params_file = OmegaConf.load(home_dir / cfg.params_file)
+    params_dir = home_dir / cfg.params_path
+    filename = cfg.params_file
+    if not filename.endswith(".json"):
+        filename += ".json"
+    params_file = OmegaConf.load(params_dir / filename)
     runs: List[RunParams] = []
 
     # Iterate through each dataset in the params file
     for dataset_name, params in params_file.items():
         for param in params:
-            # Handle hashmap size sweep (can be single value or range)
+            # Parameter sweeps
             hashmap_sizes = param["log2_hashmap_size"]
-            size_sweep = (
+            log2_hashmap_size_bounds = (
                 [hashmap_sizes] if isinstance(hashmap_sizes, int) else hashmap_sizes
             )
+
+            n_neurons = param["n_neurons"]
+            n_neurons_bounds = [n_neurons] if isinstance(n_neurons, int) else n_neurons
+
+            n_hidden_layers = param["n_hidden_layers"]
+            n_hidden_layers_bounds = (
+                [n_hidden_layers]
+                if isinstance(n_hidden_layers, int)
+                else n_hidden_layers
+            )
+
+            n_levels = param["n_levels"]
+            n_levels_bounds = [n_levels] if isinstance(n_levels, int) else n_levels
+
+            n_features_per_level = param["n_features_per_level"]
+            n_features_per_level_bounds = (
+                [n_features_per_level]
+                if isinstance(n_features_per_level, int)
+                else n_features_per_level
+            )
+
+            grid_radius = KANParams.grid_radius
+            grid_radius_step = KANParams.grid_radius_step
+            num_grids = KANParams.num_grids
+            num_grids_step = KANParams.num_grids_step
+            if "kan_params" in param:
+                kan_params = param["kan_params"]
+                if "grid_radius" in kan_params:
+                    grid_radius = kan_params.grid_radius
+                if "grid_radius_step" in kan_params:
+                    grid_radius_step = kan_params.grid_radius_step
+                if "num_grids" in kan_params:
+                    num_grids = kan_params.num_grids
+                if "num_grids_step" in kan_params:
+                    num_grids_step = kan_params.num_grids_step
+
+            if isinstance(grid_radius, float) or isinstance(grid_radius, int):
+                grid_radius_bounds = [grid_radius]
+            else:
+                grid_radius_bounds = grid_radius
+
+            num_grids_bounds = [num_grids] if isinstance(num_grids, int) else num_grids
 
             # Handle dynamic base resolution calculation
             dependent_base_resolution = False
@@ -1001,33 +1108,73 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                     "base_resolution must be an int or (int)cbrt(1<<log2_hashmap_size)"
                 )
 
+            log2_hashmap_size_step = cfg.log2_hashmap_size_step
+
             # Generate runs for all combinations
-            for size in range(size_sweep[0], size_sweep[-1] + 1):
+            for log2_hashmap_size in range(
+                log2_hashmap_size_bounds[0],
+                log2_hashmap_size_bounds[-1] + log2_hashmap_size_step,
+                log2_hashmap_size_step,
+            ):
                 if dependent_base_resolution:
                     # Calculate cube root of 2^size for base resolution
-                    base_resolution = int((1 << size) ** (1 / 3))
+                    base_resolution = int((1 << log2_hashmap_size) ** (1 / 3))
                 else:
                     base_resolution = param["base_resolution"]
 
-                # Create runs for each network type
-                for network_type in cfg.network_types:
-                    run_params = RunParams(
-                        dataset_name=dataset_name,
-                        network_type=network_type,
-                        lrate=param["lrate"],
-                        lrate_decay=param["lrate_decay"],
-                        epochs=param["epochs"],
-                        n_neurons=param["n_neurons"],
-                        n_hidden_layers=param["n_hidden_layers"],
-                        n_levels=param["n_levels"],
-                        n_features_per_level=param["n_features_per_level"],
-                        per_level_scale=param["per_level_scale"],
-                        base_resolution=base_resolution,
-                        log2_hashmap_size=size,
-                        zfp_enc=param["zfp_enc"],
-                        zfp_mlp=param["zfp_mlp"],
-                    )
-                    runs.append(run_params)
+                for n_neurons in range(n_neurons_bounds[0], n_neurons_bounds[-1] + 1):
+                    for n_hidden_layers in range(
+                        n_hidden_layers_bounds[0], n_hidden_layers_bounds[-1] + 1
+                    ):
+                        for n_levels in range(
+                            n_levels_bounds[0], n_levels_bounds[-1] + 1
+                        ):
+                            for n_features_per_level in range(
+                                n_features_per_level_bounds[0],
+                                n_features_per_level_bounds[-1] + 1,
+                            ):
+                                for (
+                                    grid_radius
+                                ) in np.arange(  # arange for float support
+                                    grid_radius_bounds[0],
+                                    grid_radius_bounds[-1] + grid_radius_step,
+                                    grid_radius_step,
+                                ):
+                                    for num_grids in range(
+                                        num_grids_bounds[0],
+                                        num_grids_bounds[-1] + num_grids_step,
+                                        num_grids_step,
+                                    ):
+                                        for network_type in cfg.network_types:
+                                            run_params = RunParams(
+                                                dataset_name=dataset_name,
+                                                network_type=network_type,
+                                                lrate=param["lrate"],
+                                                lrate_decay=param["lrate_decay"],
+                                                epochs=param["epochs"],
+                                                n_neurons=n_neurons,
+                                                n_hidden_layers=n_hidden_layers,
+                                                n_levels=n_levels,
+                                                n_features_per_level=n_features_per_level,
+                                                per_level_scale=param[
+                                                    "per_level_scale"
+                                                ],
+                                                base_resolution=base_resolution,
+                                                log2_hashmap_size=log2_hashmap_size,
+                                                zfp_enc=param["zfp_enc"],
+                                                zfp_mlp=param["zfp_mlp"],
+                                                kan_params=(
+                                                    KANParams(
+                                                        grid_radius=grid_radius,
+                                                        grid_radius_step=grid_radius_step,
+                                                        num_grids=num_grids,
+                                                        num_grids_step=num_grids_step,
+                                                    )
+                                                    if "kan" in network_type.lower()
+                                                    else None
+                                                ),
+                                            )
+                                            runs.append(run_params)
 
     # Apply filters if specified
     if cfg.dataset is not None:
@@ -1162,52 +1309,12 @@ def main(cfg: BenchmarkConfig):
     output_dir = home_dir / "results"
     output_dir.mkdir(parents=True, exist_ok=True)
     if cfg.output_filename is None:
-        # Create a unique filename based on the parameter sweeping
-        unique_filename = (
-            "_".join(
-                [
-                    params.dataset_name,
-                    params.network_type,
-                    str(params.log2_hashmap_size),
-                    str(params.n_levels),
-                ]
-            )
-            + "_results.csv"
-        )
+        # Create a unique filename
+        uid = uuid4().hex
+        unique_filename = uid + "_results.csv"
         output_path = output_dir / unique_filename
     else:
         output_path = output_dir / cfg.output_filename
-
-    # Only write CSV header on rank 0 to avoid race conditions
-    if rank == 0:
-        with open(output_path, "w") as f:
-            f.write(
-                ",".join(
-                    [
-                        # the (ordering of) datapoints collected
-                        "dataset_name",
-                        "data_size",
-                        "inr_size",
-                        "network_type",
-                        "epoch_count",
-                        "num_neurons",
-                        "num_hidden_layers",
-                        "num_levels",
-                        "num_features_per_level",
-                        "per_level_scale",
-                        "log2_hashmap_size",
-                        "base_resolution",
-                        "num_repeats",
-                        "avg_time_per_epoch",
-                        "num_gpus",
-                        "compression_ratio",
-                        "avg_psnr",
-                        "avg_ssim",
-                        "avg_mse",
-                    ]
-                )
-                + "\n"
-            )
 
     # Check if we should save the model based on the save_mode
     should_save = False
