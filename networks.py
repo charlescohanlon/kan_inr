@@ -7,6 +7,8 @@ import torch.nn.functional as F
 
 import numpy as np
 
+from benchmark import KANParams
+
 
 if torch.cuda.is_available():
     import tinycudann
@@ -388,7 +390,7 @@ class MLP_TCNN(torch.nn.Module):
 
         self.network_config = network_config
 
-        assert bias == False, "TCNN MLP doesnot contain bias"
+        assert bias == False, "TCNN MLP does not contain bias"
 
         self.model = tinycudann.Network(
             n_input_dims=self.n_input_dims,
@@ -412,7 +414,7 @@ class INR_Base(nn.Module):
         # network paramerers
         n_hidden_layers=3,
         n_neurons=64,
-        # encoder paraparametersms
+        # encoder parameters
         n_levels=16,
         n_features_per_level=4,
         log2_hashmap_size=19,
@@ -421,7 +423,7 @@ class INR_Base(nn.Module):
         activation="ReLU",
         output_activation="None",
         suppress_encoder_nan=False,
-        kan_params=None,
+        kan_params: KANParams = None,
     ):
         super(INR_Base, self).__init__()
 
@@ -434,19 +436,21 @@ class INR_Base(nn.Module):
         if self.network_type == "mlp":
             NETWORK = MLP_Native if native_network else MLP_TCNN
         elif self.network_type == "ekan":
-            if kan_params is not None:
-                NETWORK = partial(
-                    EKAN_Native,
-                    grid_size=kan_params.grid_size,
-                )
-            else:
-                NETWORK = EKAN_Native
+            raise NotImplementedError("EKAN not supported in this version.")
+            # if kan_params is not None:
+            #     NETWORK = partial(
+            #         EKAN_Native,
+            #         grid_size=kan_params.grid_size,
+            #     )
+            # else:
+            #     NETWORK = EKAN_Native
         elif self.network_type == "fkan":
             if kan_params is not None:
                 NETWORK = partial(
                     FKAN_Native,
                     grid_radius=kan_params.grid_radius,
                     num_grids=kan_params.num_grids,
+                    use_base_update=kan_params.use_base_update,
                 )
             else:
                 NETWORK = FKAN_Native
@@ -565,7 +569,6 @@ class FKAN_Native(torch.nn.Module):
         grid_radius=1.0,
         num_grids=8,
         use_base_update=True,
-        base_activation=F.silu,
     ):
         super(FKAN_Native, self).__init__()
 
@@ -590,6 +593,8 @@ class FKAN_Native(torch.nn.Module):
         grid_min = -grid_radius
         grid_max = grid_radius
         layers_hidden = [n_input_dims] + [n_neurons] * n_hidden_layers + [n_output_dims]
+        base_activation = F.silu if activation == "SiLU" else F.relu
+        self.output_activation = find_activation(output_activation)
 
         from fastkan import FastKAN
 
@@ -603,7 +608,7 @@ class FKAN_Native(torch.nn.Module):
         )
 
     def forward(self, x):
-        return self.fkan(x)
+        return self.output_activation(self.fkan(x))
 
 
 class EKAN_Native(torch.nn.Module):
