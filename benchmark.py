@@ -1133,46 +1133,50 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                                 n_features_per_level_bounds[0],
                                 n_features_per_level_bounds[-1] + 1,
                             ):
-                                for (
-                                    grid_radius
-                                ) in np.arange(  # arange for float support
-                                    grid_radius_bounds[0],
-                                    grid_radius_bounds[-1] + grid_radius_step,
-                                    grid_radius_step,
-                                ):
-                                    for num_grids in range(
-                                        num_grids_bounds[0],
-                                        num_grids_bounds[-1] + num_grids_step,
-                                        num_grids_step,
+                                for network_type in cfg.network_types:
+                                    partial_run_params = partial(
+                                        RunParams,
+                                        dataset_name=dataset_name,
+                                        network_type=network_type,
+                                        lrate=param["lrate"],
+                                        lrate_decay=param["lrate_decay"],
+                                        epochs=param["epochs"],
+                                        n_neurons=n_neurons,
+                                        n_hidden_layers=n_hidden_layers,
+                                        n_levels=n_levels,
+                                        n_features_per_level=n_features_per_level,
+                                        per_level_scale=param["per_level_scale"],
+                                        base_resolution=base_resolution,
+                                        log2_hashmap_size=log2_hashmap_size,
+                                        zfp_enc=param["zfp_enc"],
+                                        zfp_mlp=param["zfp_mlp"],
+                                    )
+                                    if "kan" not in network_type.lower():
+                                        run_params = partial_run_params(kan_params=None)
+                                        runs.append(run_params)
+                                        continue
+
+                                    # KAN parameter sweeps
+                                    for grid_radius in np.arange(
+                                        grid_radius_bounds[0],
+                                        grid_radius_bounds[-1] + grid_radius_step,
+                                        grid_radius_step,  # Use arange for float steps
                                     ):
-                                        for network_type in cfg.network_types:
-                                            run_params = RunParams(
-                                                dataset_name=dataset_name,
-                                                network_type=network_type,
-                                                lrate=param["lrate"],
-                                                lrate_decay=param["lrate_decay"],
-                                                epochs=param["epochs"],
-                                                n_neurons=n_neurons,
-                                                n_hidden_layers=n_hidden_layers,
-                                                n_levels=n_levels,
-                                                n_features_per_level=n_features_per_level,
-                                                per_level_scale=param[
-                                                    "per_level_scale"
-                                                ],
-                                                base_resolution=base_resolution,
-                                                log2_hashmap_size=log2_hashmap_size,
-                                                zfp_enc=param["zfp_enc"],
-                                                zfp_mlp=param["zfp_mlp"],
-                                                kan_params=(
-                                                    KANParams(
-                                                        grid_radius=grid_radius,
-                                                        grid_radius_step=grid_radius_step,
-                                                        num_grids=num_grids,
-                                                        num_grids_step=num_grids_step,
-                                                    )
-                                                    if "kan" in network_type.lower()
-                                                    else None
+                                        for num_grids in range(
+                                            num_grids_bounds[0],
+                                            num_grids_bounds[-1] + num_grids_step,
+                                            num_grids_step,
+                                        ):
+                                            kan_params = KANParams(
+                                                grid_radius=float(grid_radius),
+                                                grid_radius_step=float(
+                                                    grid_radius_step
                                                 ),
+                                                num_grids=int(num_grids),
+                                                num_grids_step=int(num_grids_step),
+                                            )
+                                            run_params = partial_run_params(
+                                                kan_params=kan_params
                                             )
                                             runs.append(run_params)
 
