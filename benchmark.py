@@ -69,7 +69,7 @@ class BenchmarkConfig:
     params_file: str
     network_types: List[str]
     home_dir: str
-    data_path: str
+    data_path: str = "datasets/raw"
     params_path: str = "kan_inr/params"
     batch_size: Optional[int] = None
     output_filename: Optional[str] = None
@@ -371,10 +371,13 @@ def run_benchmark(
             kan_num_grids = None
             kan_num_grids_step = None
 
+        pbs_job_id = os.getenv("PBS_JOBID")
+        pbs_array_index = os.getenv("PBS_ARRAY_INDEX", 0)
+
         # Write results to CSV
         with open(output_path, "a") as f:
             f.write(
-                ",".join(  # TODO: add batch size to datapoints
+                ",".join(
                     [
                         # the (ordering of) datapoints collected
                         "dataset_name",
@@ -397,6 +400,9 @@ def run_benchmark(
                         "kan_grid_radius_step",
                         "kan_num_grids",
                         "kan_num_grids_step",
+                        "batch_size",
+                        "pbs_job_id",
+                        "pbs_array_index",
                         "avg_psnr",
                         "avg_ssim",
                         "avg_mse",
@@ -428,6 +434,9 @@ def run_benchmark(
                             kan_grid_radius_step,
                             kan_num_grids,
                             kan_num_grids_step,
+                            batch_size,
+                            pbs_job_id,
+                            pbs_array_index,
                             avg_psnr,
                             avg_ssim,
                             avg_mse,
@@ -1317,6 +1326,7 @@ def main(cfg: BenchmarkConfig):
         uid = uuid4().hex
         unique_filename = uid + "_results.csv"
         output_path = output_dir / unique_filename
+        print(f"No output filename specified, using {unique_filename}")
     else:
         output_path = output_dir / cfg.output_filename
 
