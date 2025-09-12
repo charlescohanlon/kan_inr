@@ -7,6 +7,7 @@ distributed training via PyTorch's DistributedDataParallel (DDP).
 """
 
 from dataclasses import dataclass, asdict
+from functools import partial
 import gc
 from typing import List, Optional, Tuple
 from pathlib import Path
@@ -36,6 +37,7 @@ from pprint import pprint
 # DDP imports
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+import hashlib
 
 # Set seeds for reproducibility across all devices
 torch.manual_seed(0)  # for reproducibility
@@ -64,6 +66,7 @@ class BenchmarkConfig:
         epochs: Override epochs for all runs (uses params_file value if None)
         ssd_dir: Optional SSD directory for faster I/O during training
         log2_hashmap_size_step: Step size for sweeping log2 hashmap sizes
+        train_only: If True, only perform training without evaluation or saving
     """
 
     params_file: str
@@ -82,6 +85,7 @@ class BenchmarkConfig:
     epochs: Optional[int] = None
     ssd_dir: Optional[str] = None
     log2_hashmap_size_step: int = 1
+    train_only: bool = False
 
 
 @dataclass
@@ -140,6 +144,32 @@ class RunParams:
     zfp_enc: float
     zfp_mlp: float
     kan_params: Optional[KANParams] = None
+
+    def __hash__(self):
+        kan_params = (
+            [self.kan_params.grid_radius, self.kan_params.num_grids]
+            if self.kan_params
+            else []
+        )
+        # Parameters relevant to time taken to run one epoch
+        # (see submit_jobs.py)
+        config_tuple = (
+            self.dataset_name,
+            self.network_type,
+            self.lrate,
+            self.lrate_decay,
+            self.n_neurons,
+            self.n_hidden_layers,
+            self.n_levels,
+            self.n_features_per_level,
+            self.per_level_scale,
+            self.log2_hashmap_size,
+            self.base_resolution,
+            *kan_params,
+        )
+        param_str = repr(config_tuple)
+        # Deterministic hash
+        return int(hashlib.md5(param_str.encode("utf-8")).hexdigest(), 16)
 
 
 def run_benchmark(
@@ -286,6 +316,11 @@ def run_benchmark(
                     f"Duration = {duration:.2f}sec"
                 )
             scheduler.step()  # Step the learning rate scheduler
+
+        if cfg.train_only:
+            if cfg.repeats > 1:
+                raise ValueError("train_only mode does not support repeats > 1")
+            return
 
         # Reconstruct and compute metrics when finished training
         # Only done on main process to avoid redundant computation
