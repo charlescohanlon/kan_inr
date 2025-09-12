@@ -6,7 +6,7 @@ representations on volumetric data, supporting both single-GPU and multi-GPU
 distributed training via PyTorch's DistributedDataParallel (DDP).
 """
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from functools import partial
 import gc
 from typing import List, Optional, Tuple
@@ -65,13 +65,12 @@ class BenchmarkConfig:
         hashmap_size: Filter to only use this specific log2 hashmap size
         epochs: Override epochs for all runs (uses params_file value if None)
         ssd_dir: Optional SSD directory for faster I/O during training
-        log2_hashmap_size_step: Step size for sweeping log2 hashmap sizes
         train_only: If True, only perform training without evaluation or saving
     """
 
-    params_file: str
-    network_types: List[str]
-    home_dir: str
+    params_file: str = "params"
+    network_types: List[str] = field(default_factory=lambda: ["fkan", "mlp"])
+    home_dir: str = "/grand/insitu/cohanlon"
     data_path: str = "datasets/raw"
     params_path: str = "kan_inr/params"
     batch_size: Optional[int] = None
@@ -84,7 +83,6 @@ class BenchmarkConfig:
     hashmap_size: Optional[int] = None
     epochs: Optional[int] = None
     ssd_dir: Optional[str] = None
-    log2_hashmap_size_step: int = 1
     train_only: bool = False
 
 
@@ -98,12 +96,14 @@ class KANParams:
         grid_radius_step: Step size for grid radius adjustment
         num_grids: Number of grids in KAN (can also be a list of two bounds)
         num_grids_step: Step size for num_grids adjustment
+        use_base_update: Whether to use base update in KAN
     """
 
     grid_radius: float = 1.0
     grid_radius_step: float = 1.0
     num_grids: int = 8
     num_grids_step: int = 1
+    use_base_update: bool = True
 
 
 @dataclass
@@ -123,6 +123,7 @@ class RunParams:
         n_features_per_level: Features per hash table level
         per_level_scale: Scale factor between consecutive levels
         log2_hashmap_size: Log2 of the hash table size (can also be list of two bounds)
+        log2_hashmap_size_step: Step size for sweeping log2 hashmap sizes
         base_resolution: Base resolution for the hash encoding
         zfp_enc: ZFP compression parameter for encoder (unused in current implementation)
         zfp_mlp: ZFP compression parameter for MLP (unused in current implementation)
@@ -143,16 +144,27 @@ class RunParams:
     base_resolution: str
     zfp_enc: float
     zfp_mlp: float
+    log2_hashmap_size_step: int = 1
     kan_params: Optional[KANParams] = None
 
+    # "None", "Sigmoid", "ReLU"
+    activation: str = "ReLU"
+    output_activation: str = "None"
+
     def __hash__(self):
+        """
+        Custom hash function for RunParams to uniquely identify configurations.
+        Only includes parameters relevant to training time, excluding those that don't affect it.
+        """
         kan_params = (
-            [self.kan_params.grid_radius, self.kan_params.num_grids]
+            [
+                self.kan_params.grid_radius,
+                self.kan_params.num_grids,
+                self.kan_params.use_base_update,
+            ]
             if self.kan_params
             else []
         )
-        # Parameters relevant to time taken to run one epoch
-        # (see submit_jobs.py)
         config_tuple = (
             self.dataset_name,
             self.network_type,
@@ -165,9 +177,12 @@ class RunParams:
             self.per_level_scale,
             self.log2_hashmap_size,
             self.base_resolution,
+            self.activation,
+            self.output_activation,
             *kan_params,
         )
         param_str = repr(config_tuple)
+
         # Deterministic hash
         return int(hashlib.md5(param_str.encode("utf-8")).hexdigest(), 16)
 
@@ -408,6 +423,7 @@ def run_benchmark(
 
         pbs_job_id = os.getenv("PBS_JOBID")
         pbs_array_index = os.getenv("PBS_ARRAY_INDEX", 0)
+        run_param_hash = hash(params)
 
         # Write results to CSV
         with open(output_path, "a") as f:
@@ -438,6 +454,7 @@ def run_benchmark(
                         "batch_size",
                         "pbs_job_id",
                         "pbs_array_index",
+                        "run_param_hash",
                         "avg_psnr",
                         "avg_ssim",
                         "avg_mse",
@@ -472,6 +489,7 @@ def run_benchmark(
                             batch_size,
                             pbs_job_id,
                             pbs_array_index,
+                            run_param_hash,
                             avg_psnr,
                             avg_ssim,
                             avg_mse,
@@ -1152,7 +1170,7 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                     "base_resolution must be an int or (int)cbrt(1<<log2_hashmap_size)"
                 )
 
-            log2_hashmap_size_step = cfg.log2_hashmap_size_step
+            log2_hashmap_size_step = param["log2_hashmap_size_step"]
 
             # Generate runs for all combinations
             for log2_hashmap_size in range(
