@@ -29,7 +29,7 @@ class SubmissionConfig(BenchmarkConfig):
     wait_time: int = 10 * 60  # seconds
     dry_run: bool = False
     verbose: bool = False
-    pbs_array_index_subset: Optional[List[int]] = None
+    array_index_subset: Optional[List[int]] = None
 
 
 # Dataset sizes parsed from filenames for quick reference
@@ -161,7 +161,7 @@ class JobSubmissionManager:
         voxel_ratio = total_voxels / beechnut_voxels
 
         # Base time per epoch (calibrated from logs)
-        if params.network_type == "kan":
+        if "kan" in params.network_type:
             # KAN: ~87-88 seconds per epoch for beechnut with simple network
             base_time_per_epoch = 87.0 * voxel_ratio
         else:  # mlp
@@ -206,7 +206,7 @@ class JobSubmissionManager:
         ) / 1024**3
 
         # Network parameter memory (rough estimate)
-        if params.network_type == "kan":
+        if "kan" in params.network_type:
             # KAN networks use more memory per parameter
             params_memory_gb = (params.n_neurons * params.n_hidden_layers * 100 * 4) / (
                 1024**3
@@ -228,9 +228,10 @@ class JobSubmissionManager:
         memory_per_gpu = 35  # Conservative limit (leave headroom)
         num_gpus = max(1, int(np.ceil(total_memory_gb / memory_per_gpu)))
 
-        total_time *= 1.5
         if "kan" in params.network_type:
-            total_time *= 10  # KAN models are slower
+            total_time *= 15  # KAN models are slower
+        else:
+            total_time *= 2  # MLP models are faster
 
         seconds_per_hour = 3600
         if total_time > seconds_per_hour * 2:
@@ -269,7 +270,7 @@ class JobSubmissionManager:
         # Special cases for known difficult configurations
         # Very complex KAN networks with large hashmaps
         if (
-            params.network_type == "kan"
+            "kan" in params.network_type
             and params.n_hidden_layers >= 4
             and params.log2_hashmap_size >= 18
         ):
@@ -324,6 +325,7 @@ class JobSubmissionManager:
 #PBS -N {job_name}
 #PBS -o {self.log_dir}/
 #PBS -e {self.log_dir}/
+#PBS -m n
 # -----------------------------------
 
 # Job parameters
@@ -344,6 +346,7 @@ echo "  Number of GPUs detected: $NUM_GPUS"
 echo "  Requested GPUs: {num_gpus}"
 echo "  Walltime: {walltime}"
 echo "  System: sophia"
+echo "  Override args: {override_str}"
 echo "========================================="
 echo "Model Configuration:"
 echo "  Model type: {params.network_type}"
@@ -429,7 +432,7 @@ echo "Completed at: $(date)"
                 return
 
             print(
-                f"Queue full ({current_jobs}/{self.max_queued_jobs}). "
+                f"Queue full ({current_jobs + 1}/{self.max_queued_jobs}). "
                 f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
             )
             time.sleep(self.wait_time)
@@ -459,8 +462,8 @@ echo "Completed at: $(date)"
 
         # Submit jobs
         for run_index, params in enumerate(runs_list):
-            if self.cfg.pbs_array_index_subset is not None:
-                if run_index not in self.cfg.pbs_array_index_subset:
+            if self.cfg.array_index_subset is not None:
+                if run_index not in self.cfg.array_index_subset:
                     if self.verbose:
                         print(f"Skipping job {run_index} (not in subset)")
                     continue
