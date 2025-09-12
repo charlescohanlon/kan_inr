@@ -7,8 +7,6 @@ import torch.nn.functional as F
 
 import numpy as np
 
-from benchmark import KANParams
-
 
 if torch.cuda.is_available():
     import tinycudann
@@ -423,7 +421,7 @@ class INR_Base(nn.Module):
         activation="ReLU",
         output_activation="None",
         suppress_encoder_nan=False,
-        kan_params: KANParams = None,
+        kan_params=None,
     ):
         super(INR_Base, self).__init__()
 
