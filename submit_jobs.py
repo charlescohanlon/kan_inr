@@ -1,7 +1,6 @@
 import os
 import sys
 import subprocess
-import pexpect
 import time
 import tempfile
 import threading
@@ -14,7 +13,7 @@ from dataclasses import dataclass, fields
 import hydra
 from hydra.core.config_store import ConfigStore
 
-from benchmark import BenchmarkConfig, RunParams, parse_filename, parse_run_params
+from benchmark import BenchmarkConfig, RunParams, parse_run_params
 
 
 @dataclass
@@ -23,106 +22,81 @@ class SubmissionConfig(BenchmarkConfig):
 
     # Submission-specific parameters
     max_jobs: int = 20
-    queue_job_wait_time: int = 10 * 60  # seconds
+    wait_time: int = 10 * 60
     dry_run: bool = False
     verbose: bool = False
     array_index_subset: Optional[List[int]] = None
-    num_workers: int = 8  # Number of concurrent test_epoch+submission workers
     num_minutes_per_job: float = 3
-    epoch_time_only: bool = False
+    compute_epoch_time_only: bool = False
 
 
 class JobSubmissionManager:
     def __init__(self, cfg: SubmissionConfig):
         self.cfg = cfg
         self.max_queued_jobs = cfg.max_jobs
-        self.wait_time = cfg.queue_job_wait_time
+        self.wait_time = cfg.wait_time
         self.dry_run = cfg.dry_run
         self.verbose = cfg.verbose
         self.home_dir = Path(cfg.home_dir)
+        self.array_index_subset = cfg.array_index_subset
+        self.num_minutes_per_job = cfg.num_minutes_per_job
+
+        # Directories for logs and memoization
         self.log_dir = self.home_dir / "kan_inr" / "logs"
         self.memo_dir = self.home_dir / "memo"
+        self.test_epoch_dir = self.log_dir / "test_epochs"
         self.memo_dir.mkdir(parents=True, exist_ok=True)
-        if self.cfg.dataset is not None:
-            self.log_dir /= self.cfg.dataset
         self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.test_epoch_dir.mkdir(parents=True, exist_ok=True)
 
         # Only empirically compute epoch times (no submission)
-        self.epoch_time_only = cfg.epoch_time_only
+        self.compute_epoch_time_only = cfg.compute_epoch_time_only
 
         # For storing test epoch timing results
-        self.timing_results = {}
-        self.interactive_session = None
-        self.test_epoch_queue = queue.Queue()
+        self.epoch_timing_results = {}
 
         # Memoization file for timing results
         self.timing_memo_file = self.memo_dir / "epoch_timing_memo.pkl"
         self.load_timing_memoization()
 
-        # For thread-safe access to the interactive session
-        self.interactive_session_lock = threading.Lock()
-        # For thread-safe access to timing results memoization
-        self.timing_results_lock = threading.Lock()
-        # For thread-safe printing (to stdout)
-        self.print_lock = threading.Lock()
-
     def get_timing_results_key(self, params: RunParams) -> str:
-        return str(hash(params))  # Use RunParams __hash__ method for unique key
+        return str(hash(params))  # See RunParams __hash__ method
 
     def load_timing_memoization(self):
         """Load existing timing results from memoization file"""
         if self.timing_memo_file.exists():
             try:
                 with open(self.timing_memo_file, "rb") as f:
-                    self.timing_results = pickle.load(f)
-                if self.verbose:
-                    print(
-                        f"Loaded {len(self.timing_results)} timing results from memoization file"
-                    )
+                    self.epoch_timing_results = pickle.load(f)
             except (pickle.PickleError, FileNotFoundError, EOFError) as e:
-                if self.verbose:
-                    print(f"Warning: Could not load timing memoization file: {e}")
-                self.timing_results = {}
+                print(f"Warning: Could not load timing memoization file: {e}")
+                self.epoch_timing_results = {}
         else:
-            self.timing_results = {}
+            self.epoch_timing_results = {}
 
     def save_timing_memoization(self):
         """Save timing results to memoization file"""
-        with self.timing_results_lock:
-            try:
-                with open(self.timing_memo_file, "wb") as f:
-                    pickle.dump(self.timing_results, f)
-                if self.verbose:
-                    print(
-                        f"Saved {len(self.timing_results)} timing results to memoization file"
-                    )
-            except (pickle.PickleError, OSError) as e:
-                if self.verbose:
-                    print(f"Warning: Could not save timing memoization file: {e}")
+        try:
+            with open(self.timing_memo_file, "wb") as f:
+                pickle.dump(self.epoch_timing_results, f)
+        except (pickle.PickleError, OSError) as e:
+            print(f"Warning: Could not save timing memoization file: {e}")
 
     def has_cached_timing(self, params: RunParams) -> bool:
         """Check if timing results exist for given RunParams"""
         key = self.get_timing_results_key(params)
-        return key in self.timing_results
+        return key in self.epoch_timing_results
 
-    def get_dataset_info(self, dataset_name: str) -> Tuple[Tuple[int, int, int], str]:
-        """Get dataset shape and type from pre-parsed info or by finding the file"""
+    def create_test_epoch_script(self, run_indices: List[int]) -> Tuple[str, Path]:
+        """Create a bash script for testing single epochs"""
+        # Estimate walltime for test epoch runs
+        time_in_minutes = len(run_indices) * self.num_minutes_per_job
+        walltime = (
+            f"{int(time_in_minutes // 60):02d}:{int(time_in_minutes % 60):02d}:00"
+        )
+        job_name = "test_epochs"
 
-        # If not found, try to find the actual file
-        data_dir = self.home_dir / self.cfg.data_path
-        if data_dir.exists():
-            for dataset_file in os.listdir(data_dir):
-                if dataset_file.startswith(dataset_name):
-                    data_path = data_dir / dataset_file
-                    _, shape, dtype = parse_filename(data_path)
-                    return shape, dtype
-
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    def create_test_epoch_script(
-        self, run_index: int, params: RunParams
-    ) -> Tuple[str, Path]:
-        """Create a bash script for testing a single epoch"""
+        # Convert SubmissionConfig superclass to BenchmarkConfig for argument parsing
         submission_fields = {f.name for f in fields(SubmissionConfig)}
         test_epoch_fields = {f.name for f in fields(BenchmarkConfig)}
         override_args = []
@@ -134,153 +108,70 @@ class JobSubmissionManager:
                 else:
                     override_args.append(f'{key}={str(self.cfg[key]).replace(" ", "")}')
 
-        # Add epochs=1 to ensure single epoch
         override_args.append("epochs=1")
-
-        # Only train, no eval or save
         override_args.append("train_only=True")
-
         override_str = " ".join(override_args).replace("'", '"')
 
-        # Create timing file path
-        timing_file = self.log_dir / f"test_epoch_timing_{run_index}.txt"
+        timing_file = self.test_epoch_dir / "test_epoch_timings.txt"
 
         script = f"""#!/bin/bash
+# ---------- PBS DIRECTIVES ----------
+#PBS -A insitu
+#PBS -q by-gpu
+#PBS -l select=1:ncpus=8:gputype=A100:system=sophia
+#PBS -l walltime={walltime}
+#PBS -l filesystems=home:grand
+#PBS -N {job_name}
+#PBS -o {self.test_epoch_dir}
+#PBS -e {self.test_epoch_dir}
+#PBS -m n
+# -----------------------------------
+
 source /grand/insitu/cohanlon/miniconda3/etc/profile.d/conda.sh 
 cd /grand/insitu/cohanlon/kan_inr
 conda activate kan_inr
-
-export PBS_ARRAY_INDEX={run_index}
-
-START_TIME=$(date +%s.%N)
-
-# Run single epoch benchmark
-python benchmark.py -cn config {override_str}
-
-END_TIME=$(date +%s.%N)
-ELAPSED=$(echo "$END_TIME - $START_TIME" | bc)
-
-echo "$ELAPSED" > {timing_file}
+for run_index in {' '.join(map(str, run_indices))}; do
+    START_TIME=$(date +%s.%N)
+    PBS_ARRAY_INDEX=$run_index python benchmark.py -cn config {override_str}
+    END_TIME=$(date +%s.%N)
+    ELAPSED=$(echo "$END_TIME - $START_TIME" | bc)
+    echo "run_index: $run_index, time_elapsed: $ELAPSED" >> {timing_file}
+done
 """
         return script, timing_file
 
-    def start_interactive_session(self, total_runs: int):
-        """Start an interactive PBS session in the background"""
-        # Calculate walltime for interactive session
-        minutes = round(total_runs * self.cfg.num_minutes_per_job)
-        hours = minutes // 60
-        remaining_minutes = minutes % 60
-        walltime = f"{hours:02d}:{remaining_minutes:02d}:00"
-
-        if self.verbose:
-            print(f"Waiting on interactive session with walltime {walltime}")
-
-        if not self.dry_run:
-            # Start interactive session with pexpect
-            # (requires PTY which subprocess can't provide)
-            args = [
-                "-I",
-                "-A",
-                "insitu",
-                "-q",
-                "by-gpu",
-                "-l",
-                "select=1:ncpus=8:gputype=A100:system=sophia",
-                "-l",
-                "filesystems=home:grand",
-                "-l",
-                f"walltime={walltime}",
-            ]
-            self.interactive_session = pexpect.spawn(
-                "qsub", args, encoding="utf-8", timeout=None
-            )
-            # Monitor until the interactive job starts (i.e., output contains "ready")
-            exit_code = self.interactive_session.expect("ready", timeout=None)
-            if exit_code != 0:
-                raise RuntimeError("Failed to start interactive session")
-
-            if self.verbose:
-                print("Interactive session started")
-
-    def get_test_epoch_time(self, run_index: int, params: RunParams) -> float:
-        """Run a single epoch and return the time taken"""
-        # Check if we have cached timing results for this RunParams
-        if self.has_cached_timing(params):
-            key = self.get_timing_results_key(params)
-            cached_result = self.timing_results[key]
-            num_gpus = cached_result["num_gpus"]
-            epoch_time = cached_result["test_epoch_time"]
-            if self.verbose:
-                with self.print_lock:
-                    print(
-                        f"  Using cached timing: {epoch_time:.2f} seconds on {num_gpus} GPUs"
-                    )
-            return epoch_time
-
-        if self.dry_run:
-            return 1.0  # Dummy time for dry run
-
-        # Create test_epoch script
-        script_content, timing_file = self.create_test_epoch_script(run_index, params)
-
+    def start_test_epoch_script(self, script_content: str) -> str:
+        """Submit the test epoch script to PBS and return the job ID"""
         # Write script to temporary file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
             f.write(script_content)
             script_path = f.name
 
-        try:
-            # Make script executable
-            os.chmod(script_path, 0o755)
+        # Make script executable
+        os.chmod(script_path, 0o755)
 
-            # Run the test_epoch script in the interactive session
-            if self.interactive_session:
-                # Thread-safe access to interactive session
-                with self.interactive_session_lock:
-                    if self.verbose:
-                        with self.print_lock:
-                            print(f"  Running test epoch for job {run_index}...")
+        # Submit script to PBS
+        result = subprocess.run(
+            ["qsub", script_path],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        job_id = result.stdout.strip()
 
-                    # Send the script to the interactive session
-                    self.interactive_session.sendline(f"bash {script_path}\n")
-                    self.interactive_session.expect("\n", timeout=None)
+        if self.verbose:
+            print(f"Submitted test epoch script as job {job_id}")
 
-                    while not timing_file.exists():
-                        time.sleep(5)
+        return job_id
 
-                    if timing_file.exists():
-                        with open(timing_file, "r") as f:
-                            elapsed_time = float(f.read().strip())
-
-                        # Clean up timing file
-                        timing_file.unlink()
-
-                        if self.verbose:
-                            with self.print_lock:
-                                print(
-                                    f"Test epoch for job {run_index} completed in {elapsed_time:.2f} seconds"
-                                )
-                    else:
-                        raise RuntimeError(
-                            f"Test epoch for job {run_index} did not complete in time"
-                        )
-
-                return elapsed_time
-
-            else:
-                raise RuntimeError("Interactive session is not active")
-        finally:
-            # Clean up script file
-            if os.path.exists(script_path):
-                os.unlink(script_path)
-
-    def get_walltime(self, params: RunParams, epoch_time: float) -> str:
+    def get_walltime_and_gpus(self, params: RunParams, epoch_time: float) -> str:
         """
         Estimate walltime based on empirical test epoch timing.
         """
         # Calculate total estimated time
-        # NOTE: uses 0.8 b/c epoch_time includes other overhead so there is
-        # which adds padding to the estimate
-        total_time = 0.8 * params.epochs * self.cfg.repeats * epoch_time
+        # NOTE: epoch_time includes other overhead which pads the estimate
+        # +1 for reconstruction overhead
+        total_time = (params.epochs + 1) * self.cfg.repeats * epoch_time
 
         # Adjust for extra GPUs based on time thresholds
         num_gpus = 1
@@ -291,16 +182,6 @@ echo "$ELAPSED" > {timing_file}
             num_gpus = max(4, num_gpus)
         if total_time > seconds_per_hour * 8:
             num_gpus = 8
-
-        # Update memoization immediately when new results are added
-        key = self.get_timing_results_key(params)
-        with self.timing_results_lock:
-            self.timing_results[key] = {
-                "num_gpus": num_gpus,
-                "test_epoch_time": epoch_time,
-            }
-        if not self.dry_run:
-            self.save_timing_memoization()
 
         # Adjust time estimate for multi-GPU (not perfect scaling)
         if num_gpus > 1:
@@ -332,14 +213,14 @@ echo "$ELAPSED" > {timing_file}
         if hours == 0 and minutes < 30:
             walltime = "00:30:00"
 
-        return walltime
+        return walltime, num_gpus
 
     def generate_pbs_script(
         self,
         run_index: int,
         params: RunParams,
-        num_gpus: int,
         walltime: str,
+        num_gpus: int = 1,
     ) -> str:
         """Generate a customized PBS script for this specific job"""
         # Generate a descriptive job name (PBS limits to 15 chars)
@@ -359,7 +240,7 @@ echo "$ELAPSED" > {timing_file}
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
 #PBS -q by-gpu
-#PBS -l select=1:ncpus={num_gpus*8}:gputype=A100:system=sophia
+#PBS -l select={num_gpus}:ncpus={num_gpus*8}:gputype=A100:system=sophia
 #PBS -l walltime={walltime}
 #PBS -l filesystems=home:grand
 #PBS -N {job_name}
@@ -397,73 +278,36 @@ echo "Completed at: $(date)"
 """
         return script
 
-    def submit_job_with_timing(
+    def submit_job(
         self,
         run_index: int,
         params: RunParams,
-        epoch_time: float,
-    ) -> bool:
-        """Submit a single job using empirical timing and return success status"""
-        # Get walltime given test epoch time
-        walltime = self.get_walltime(params, epoch_time)
+        walltime: str,
+        num_gpus: int = 1,
+    ):
+        """Submit a job to the PBS scheduler"""
+        # Generate PBS script to submit job
+        script_content = self.generate_pbs_script(run_index, params, walltime, num_gpus)
 
-        # At this point num_gpus and walltime are known
-        if self.epoch_time_only:
-            if self.verbose:
-                with self.print_lock:
-                    key = self.get_timing_results_key(params)
-                    num_gpus = self.timing_results[key]["num_gpus"]
-                    print(
-                        f"Job {run_index}: Computed epoch time {epoch_time:.2f} seconds on {num_gpus} GPUs,"
-                        f"would request {walltime} walltime"
-                    )
-            return True
+        # Submit via stdin to qsub, wait for success (will fail if queue is full)
+        while True:
+            try:
+                self.wait_for_slot()
+                result = subprocess.run(
+                    ["qsub"],
+                    input=script_content,
+                    text=True,
+                    capture_output=True,
+                    check=True,  # Raise error on non-zero exit code
+                )
 
-        # Get GPU count from stored results
-        key = self.get_timing_results_key(params)
-        with self.timing_results_lock:
-            num_gpus = self.timing_results.get(key, {}).get("num_gpus", 1)
-
-        data_shape, data_type = self.get_dataset_info(params.dataset_name)
-
-        if self.verbose or self.dry_run:
-            with self.print_lock:
-                print(f"\nJob {run_index}:")
-                print(f"  Dataset shape: {data_shape} ({data_type})")
-                print("  Run Parameters:")
-                for field in fields(RunParams):
-                    value = getattr(params, field.name)
-                    print(f"    {field.name}: {value}")
-                print(f"  Test Epoch time: {epoch_time:.2f} seconds")
-                print(f"  Resources: {num_gpus} GPUs, {walltime} walltime")
-
-        if self.dry_run:
-            return True
-
-        # Generate PBS script
-        script_content = self.generate_pbs_script(run_index, params, num_gpus, walltime)
-
-        # Submit via stdin to qsub
-        try:
-            result = subprocess.run(
-                ["qsub"],
-                input=script_content,
-                text=True,
-                capture_output=True,
-                check=True,
-            )
-            job_id = result.stdout.strip()
-
-            if self.verbose:
-                with self.print_lock:
+                if self.verbose:
+                    job_id = result.stdout.strip()
                     print(f"  Submitted: {job_id}")
 
-            return True
-
-        except subprocess.CalledProcessError as e:
-            with self.print_lock:
-                print(f"ERROR submitting job {run_index}: {e.stderr}")
-            return False
+                return
+            except subprocess.CalledProcessError as e:
+                self.wait_for_slot(must_wait=True)
 
     def get_queued_jobs(self) -> int:
         """Get the current number of queued jobs for the user"""
@@ -480,67 +324,19 @@ echo "Completed at: $(date)"
         except:
             return 0
 
-    def wait_for_slot(self, must_wait=False, should_print=False):
+    def wait_for_slot(self, must_wait=False):
         """Wait for a queue slot to become available"""
         while True:
             current_jobs = self.get_queued_jobs()
             if current_jobs < self.max_queued_jobs and not must_wait:
                 return
 
-            if should_print:
-                with self.print_lock:
-                    print(
-                        f"Queue full ({current_jobs + 1}/{self.max_queued_jobs}). "
-                        f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
-                    )
+            print(
+                f"{current_jobs} are currently queued. "
+                f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
+            )
             time.sleep(self.wait_time)
             must_wait = False  # Only force wait once
-
-    def test_epoch_and_submit_worker(self, work_queue: queue.Queue, worker_id: int = 0):
-        """Worker thread to process test epoch and submission tasks"""
-        while True:
-            try:
-                task = work_queue.get(timeout=1)
-                if task is None:  # Poison pill to stop worker
-                    break
-
-                run_index, params = task
-
-                try:
-                    epoch_time = self.get_test_epoch_time(run_index, params)
-
-                    # Only proceed if we got a valid epoch time
-                    if epoch_time > 0:
-                        # Submit job with empirical timing
-                        if not self.dry_run:
-                            self.wait_for_slot()
-
-                        success = False
-                        while not success:
-                            success = self.submit_job_with_timing(
-                                run_index, params, epoch_time
-                            )
-                            if not self.dry_run and not self.epoch_time_only:
-                                # If last submission failed, must wait before trying again
-                                must_wait = not success
-                                # Only first worker prints
-                                should_print = worker_id == 0
-                                self.wait_for_slot(must_wait, should_print)
-
-                        if not self.dry_run:
-                            time.sleep(1)  # Small delay to avoid overwhelming scheduler
-                    else:
-                        raise ValueError("Invalid epoch time")
-
-                except Exception as e:
-                    print(f"Failed to process job {run_index}: {e}, skipping job")
-
-                work_queue.task_done()
-
-            except queue.Empty:
-                continue
-            except Exception as e:
-                print(f"Error in worker thread: {e}")
 
     def run(self):
         """Main execution loop"""
@@ -555,75 +351,128 @@ echo "Completed at: $(date)"
             return
 
         # Filter by array_index_subset if specified
-        if self.cfg.array_index_subset is not None:
-            subset_runs = [
-                (i, r)
-                for i, r in enumerate(runs_list)
-                if i in self.cfg.array_index_subset
+        if self.array_index_subset is not None:
+            runs_list = [
+                (i, r) for i, r in enumerate(runs_list) if i in self.array_index_subset
             ]
         else:
-            subset_runs = list(enumerate(runs_list))
+            runs_list = list(enumerate(runs_list))
 
-        actual_runs = len(subset_runs)
-
-        # Count how many runs have cached timing vs need computation
-        cached_count = sum(
-            1 for _, params in subset_runs if self.has_cached_timing(params)
-        )
-        new_count = actual_runs - cached_count
-
-        print(f"Timing status: {cached_count} cached, {new_count} to compute")
-
-        # Print summary of datasets if verbose
+        # Summary of datasets to process
         if self.verbose:
-            datasets = set(r.dataset_name for r in runs_list)
+            datasets = set(r.dataset_name for _, r in runs_list)
             print(f"Datasets to process: {', '.join(sorted(datasets))}")
 
-        # Start interactive session
-        if not self.dry_run:
-            self.start_interactive_session(actual_runs)
+        cached_runs, compute_runs = [], []
+        for run_index, params in runs_list:
+            if self.has_cached_timing(params):
+                cached_runs.append((run_index, params))
+            else:
+                compute_runs.append((run_index, params))
 
-        # Create work queue
-        work_queue = queue.Queue()
+        num_caches, num_compute = len(cached_runs), len(compute_runs)
+        print(f"Timing status: {num_caches} cached, {num_compute} to compute")
 
-        # Add all jobs to the queue
-        for run_index, params in subset_runs:
-            work_queue.put((run_index, params))
+        def _submit(i: int, p: RunParams):
+            key = self.get_timing_results_key(p)
+            time_elapsed = self.epoch_timing_results[key]
+            walltime, num_gpus = self.get_walltime_and_gpus(p, time_elapsed)
 
-        # Start worker threads for concurrent test epoch and submission
-        num_workers = min(self.cfg.num_workers, actual_runs)
-        workers = []
+            if self.verbose or self.dry_run:
+                print(f"\nJob {i}:")
+                print("  Run Parameters")
+                for field in fields(RunParams):
+                    value = getattr(p, field.name)
+                    print(f"    {field.name}: {value}")
+                print(f"  Epoch time: {time_elapsed:.2f} seconds")
+                print(f"  Resources: {num_gpus} GPUs, {walltime} walltime")
 
-        for worker_id in range(num_workers):
-            worker = threading.Thread(
-                target=self.test_epoch_and_submit_worker, args=(work_queue, worker_id)
-            )
-            worker.start()
-            workers.append(worker)
+            if not self.dry_run:
+                self.submit_job(i, p, walltime, num_gpus)
 
-        # Wait for all tasks to complete
-        work_queue.join()
+        def _summary(computed_completed=num_compute):
+            print("\n=== SUBMISSION SUMMARY ===")
+            print(f"Total runs: {num_caches + computed_completed}")
+            print(f"Timing results from cached: {num_caches}")
+            print(f"Timing results computed: {computed_completed}")
 
-        # Stop workers
-        for _ in range(num_workers):
-            work_queue.put(None)
+        # First submit cached runs
+        for run_index, params in cached_runs:
+            if self.verbose:
+                print("\nSubmitting cached run:")
+            _submit(run_index, params)
 
-        for worker in workers:
-            worker.join()
+        if num_compute == 0:
+            _summary()
+            return
 
-        # Close interactive session
-        if self.interactive_session:
-            try:
-                self.interactive_session.sendline("exit")
-                self.interactive_session.expect(pexpect.EOF, timeout=60)
-            except Exception:
-                self.interactive_session.close(force=True)
-        # Final summary
-        print("\n=== SUBMISSION SUMMARY ===")
-        print(f"Total runs: {total_runs}")
-        print(f"Processed: {actual_runs}")
-        print(f"Timing results cached: {cached_count}")
-        print(f"New timing computations: {new_count}")
+        job_id = None
+        jobs_run = set()
+        try:
+            # Then submit the test epoch script for runs needing timing
+            compute_indices = [i for i, _ in compute_runs]
+            script_content, timing_file = self.create_test_epoch_script(compute_indices)
+
+            if not self.dry_run:
+                job_id = self.start_test_epoch_script(script_content)
+
+                # Timing file exists when first run completes
+                while not timing_file.exists():
+                    time.sleep(30)
+            else:
+                # In dry run mode, create a fake timing file
+                create_dry_run_timing_file(timing_file, compute_indices)
+
+            while len(jobs_run) < len(compute_indices):
+                with open(timing_file, "r") as f:
+                    lines = f.readlines()
+
+                for line in lines:
+                    if not "run_index" in line or not "time_elapsed" in line:
+                        continue
+
+                    parts = line.strip().split(",")
+                    run_index = int(parts[0].split(":")[1].strip())
+                    time_elapsed = float(parts[1].split(":")[1].strip())
+                    # Find corresponding RunParams
+                    params = next(p for i, p in compute_runs if i == run_index)
+
+                    # Timing results now known, save them
+                    key = self.get_timing_results_key(params)
+                    self.epoch_timing_results[key] = time_elapsed
+                    if not self.dry_run:
+                        self.save_timing_memoization()
+
+                    if (run_index in jobs_run) or self.compute_epoch_time_only:
+                        continue
+
+                    _submit(run_index, params)
+                    jobs_run.add(run_index)
+
+                if len(jobs_run) < len(compute_indices):
+                    time.sleep(30)  # Wait for file to update
+
+        except KeyboardInterrupt:
+            print("\nComputing epoch test times interrupted by user.")
+        finally:
+            # Clean up
+            if timing_file.exists():
+                timing_file.unlink()
+
+            if job_id is not None:
+                # Terminate test epoch job
+                subprocess.run(["qdel", job_id])
+
+            # Final summary
+            _summary(computed_completed=len(jobs_run))
+
+
+def create_dry_run_timing_file(timing_file: Path, compute_indices: List[int]):
+    """Create a fake timing file for dry run mode"""
+    fake_time = -1.0
+    with open(timing_file, "w") as f:
+        for run_index in compute_indices:
+            f.write(f"run_index: {run_index}, time_elapsed: {fake_time}\n")
 
 
 # Register the config schema with Hydra as a structured config
@@ -637,11 +486,10 @@ cs.store(name="config", node=SubmissionConfig)
 def main(cfg: SubmissionConfig):
     """Main entry point with Hydra configuration"""
 
-    # Print configuration if verbose
     if cfg.verbose:
         print("Submission Configuration:")
         print(f"  Max queued jobs: {cfg.max_jobs}")
-        print(f"  Queue Job Wait time: {cfg.queue_job_wait_time} seconds")
+        print(f"  Queue Job Wait time: {cfg.wait_time} seconds")
         print(f"  Dry run: {cfg.dry_run}")
         print(f"  Verbose: {cfg.verbose}")
         if cfg.dataset:
