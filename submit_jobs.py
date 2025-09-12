@@ -1,22 +1,19 @@
-"""
-PBS Job Submission Script with Dynamic Resource Allocation
-Submits jobs with appropriate GPU and walltime requests based on job complexity
-"""
-
 import os
 import sys
 import subprocess
+import pexpect
 import time
+import tempfile
+import threading
+import queue
+import pickle
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 from dataclasses import dataclass, fields
 
 import hydra
 from hydra.core.config_store import ConfigStore
-import numpy as np
-from omegaconf import DictConfig, OmegaConf
 
-# Import everything we need from benchmark.py
 from benchmark import BenchmarkConfig, RunParams, parse_filename, parse_run_params
 
 
@@ -26,90 +23,90 @@ class SubmissionConfig(BenchmarkConfig):
 
     # Submission-specific parameters
     max_jobs: int = 20
-    wait_time: int = 10 * 60  # seconds
+    queue_job_wait_time: int = 10 * 60  # seconds
     dry_run: bool = False
     verbose: bool = False
     array_index_subset: Optional[List[int]] = None
-
-
-# Dataset sizes parsed from filenames for quick reference
-DATASET_INFO = {
-    "3d_neurons_15_sept_2016": (2048, 2048, 1718, "uint16"),
-    "aneurism": (256, 256, 256, "uint8"),
-    "backpack": (512, 512, 373, "uint16"),
-    "beechnut": (1024, 1024, 1546, "uint16"),
-    "blunt_fin": (256, 128, 64, "uint8"),
-    "boston_teapot": (256, 256, 178, "uint8"),
-    "bunny": (512, 512, 361, "uint16"),
-    "carp": (256, 256, 512, "uint16"),
-    "chameleon": (1024, 1024, 1080, "uint16"),
-    "christmas_tree": (512, 499, 512, "uint16"),
-    "csafe_heptane": (302, 302, 302, "uint8"),
-    "dns": (10240, 7680, 1536, "float64"),
-    "duct": (193, 194, 1000, "float32"),
-    "engine": (256, 256, 128, "uint8"),
-    "foot": (256, 256, 256, "uint8"),
-    "frog": (256, 256, 44, "uint8"),
-    "fuel": (64, 64, 64, "uint8"),
-    "hcci_oh": (560, 560, 560, "float32"),
-    "hydrogen_atom": (128, 128, 128, "uint8"),
-    "jicf_q": (1408, 1080, 1100, "float32"),
-    "kingsnake": (1024, 1024, 795, "uint8"),
-    "lobster": (301, 324, 56, "uint8"),
-    "magnetic_reconnection": (512, 512, 512, "float32"),
-    "marmoset_neurons": (1024, 1024, 314, "uint8"),
-    "marschner_lobb": (41, 41, 41, "uint8"),
-    "miranda": (1024, 1024, 1024, "float32"),
-    "mri_ventricles": (256, 256, 124, "uint8"),
-    "mri_woman": (256, 256, 109, "uint16"),
-    "mrt_angio": (416, 512, 112, "uint16"),
-    "neghip": (64, 64, 64, "uint8"),
-    "neocortical_layer_1_axons": (1464, 1033, 76, "uint8"),
-    "nucleon": (41, 41, 41, "uint8"),
-    "pancreas": (240, 512, 512, "int16"),
-    "pawpawsaurus": (958, 646, 1088, "uint16"),
-    "pig_heart": (2048, 2048, 2612, "int16"),
-    "present": (492, 492, 442, "uint16"),
-    "prone": (512, 512, 463, "uint16"),
-    "richtmyer_meshkov": (2048, 2048, 1920, "uint8"),
-    "rotstrat_temperature": (4096, 4096, 4096, "float32"),
-    "shockwave": (64, 64, 512, "uint8"),
-    "silicium": (98, 34, 34, "uint8"),
-    "skull": (256, 256, 256, "uint8"),
-    "spathorhynchus": (1024, 1024, 750, "uint16"),
-    "stag_beetle": (832, 832, 494, "uint16"),
-    "statue_leg": (341, 341, 93, "uint8"),
-    "stent": (512, 512, 174, "uint16"),
-    "synthetic_truss_with_five_defects": (1200, 1200, 1200, "float32"),
-    "tacc_turbulence": (256, 256, 256, "float32"),
-    "tooth": (103, 94, 161, "uint8"),
-    "vertebra": (512, 512, 512, "uint16"),
-    "vis_male": (128, 256, 256, "uint8"),
-    "woodbranch": (2048, 2048, 2048, "uint16"),
-    "zeiss": (680, 680, 680, "uint8"),
-}
+    num_workers: int = 8  # Number of concurrent test_epoch+submission workers
+    num_minutes_per_job: float = 3
+    epoch_time_only: bool = False
 
 
 class JobSubmissionManager:
     def __init__(self, cfg: SubmissionConfig):
         self.cfg = cfg
         self.max_queued_jobs = cfg.max_jobs
-        self.wait_time = cfg.wait_time
+        self.wait_time = cfg.queue_job_wait_time
         self.dry_run = cfg.dry_run
         self.verbose = cfg.verbose
         self.home_dir = Path(cfg.home_dir)
         self.log_dir = self.home_dir / "kan_inr" / "logs"
+        self.memo_dir = self.home_dir / "memo"
+        self.memo_dir.mkdir(parents=True, exist_ok=True)
         if self.cfg.dataset is not None:
             self.log_dir /= self.cfg.dataset
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
+        # Only empirically compute epoch times (no submission)
+        self.epoch_time_only = cfg.epoch_time_only
+
+        # For storing test epoch timing results
+        self.timing_results = {}
+        self.interactive_session = None
+        self.test_epoch_queue = queue.Queue()
+
+        # Memoization file for timing results
+        self.timing_memo_file = self.memo_dir / "epoch_timing_memo.pkl"
+        self.load_timing_memoization()
+
+        # For thread-safe access to the interactive session
+        self.interactive_session_lock = threading.Lock()
+        # For thread-safe access to timing results memoization
+        self.timing_results_lock = threading.Lock()
+        # For thread-safe printing (to stdout)
+        self.print_lock = threading.Lock()
+
+    def get_timing_results_key(self, params: RunParams) -> str:
+        return str(hash(params))  # Use RunParams __hash__ method for unique key
+
+    def load_timing_memoization(self):
+        """Load existing timing results from memoization file"""
+        if self.timing_memo_file.exists():
+            try:
+                with open(self.timing_memo_file, "rb") as f:
+                    self.timing_results = pickle.load(f)
+                if self.verbose:
+                    print(
+                        f"Loaded {len(self.timing_results)} timing results from memoization file"
+                    )
+            except (pickle.PickleError, FileNotFoundError, EOFError) as e:
+                if self.verbose:
+                    print(f"Warning: Could not load timing memoization file: {e}")
+                self.timing_results = {}
+        else:
+            self.timing_results = {}
+
+    def save_timing_memoization(self):
+        """Save timing results to memoization file"""
+        with self.timing_results_lock:
+            try:
+                with open(self.timing_memo_file, "wb") as f:
+                    pickle.dump(self.timing_results, f)
+                if self.verbose:
+                    print(
+                        f"Saved {len(self.timing_results)} timing results to memoization file"
+                    )
+            except (pickle.PickleError, OSError) as e:
+                if self.verbose:
+                    print(f"Warning: Could not save timing memoization file: {e}")
+
+    def has_cached_timing(self, params: RunParams) -> bool:
+        """Check if timing results exist for given RunParams"""
+        key = self.get_timing_results_key(params)
+        return key in self.timing_results
+
     def get_dataset_info(self, dataset_name: str) -> Tuple[Tuple[int, int, int], str]:
         """Get dataset shape and type from pre-parsed info or by finding the file"""
-
-        # First check our pre-parsed dataset info
-        if dataset_name in DATASET_INFO:
-            shape, dtype = DATASET_INFO[dataset_name][:3], DATASET_INFO[dataset_name][3]
-            return shape, dtype
 
         # If not found, try to find the actual file
         data_dir = self.home_dir / self.cfg.data_path
@@ -122,117 +119,171 @@ class JobSubmissionManager:
 
         raise ValueError(f"Unknown dataset: {dataset_name}")
 
-    def estimate_resources(self, params: RunParams) -> Tuple[int, str]:
-        """
-        Estimate required resources based on job parameters using A100 specifications.
+    def create_test_epoch_script(
+        self, run_index: int, params: RunParams
+    ) -> Tuple[str, Path]:
+        """Create a bash script for testing a single epoch"""
+        submission_fields = {f.name for f in fields(SubmissionConfig)}
+        test_epoch_fields = {f.name for f in fields(BenchmarkConfig)}
+        override_args = []
+        for key in submission_fields:
+            if key in test_epoch_fields and self.cfg[key] is not None:
+                # Override repeats to 1 for test epoch
+                if key == "repeats":
+                    override_args.append("repeats=1")
+                else:
+                    override_args.append(f'{key}={str(self.cfg[key]).replace(" ", "")}')
 
-        Based on empirical data from beechnut dataset runs:
-        - KAN models are ~5-8x slower than MLP models
-        - Larger hashmap sizes increase runtime exponentially for h>16
-        - Complex networks (more layers/neurons) significantly increase runtime
-        - Memory requirements scale with dataset size and model complexity
+        # Add epochs=1 to ensure single epoch
+        override_args.append("epochs=1")
 
-        Returns:
-            (num_gpus, walltime_str) - Number of GPUs and walltime in HH:MM:SS format
-        """
-        # Get dataset information
-        shape, dtype = self.get_dataset_info(params.dataset_name)
+        # Only train, no eval or save
+        override_args.append("train_only=True")
 
-        # Calculate dataset size in GB
-        dtype_sizes = {
-            "uint8": 1,
-            "int8": 1,
-            "uint16": 2,
-            "int16": 2,
-            "float32": 4,
-            "int32": 4,
-            "float64": 8,
-            "int64": 8,
-        }
-        bytes_per_element = dtype_sizes.get(dtype, 4)
-        dataset_size_gb = (shape[0] * shape[1] * shape[2] * bytes_per_element) / (
-            1024**3
-        )
-        total_voxels = shape[0] * shape[1] * shape[2]
+        override_str = " ".join(override_args).replace("'", '"')
 
-        # Base runtime estimation (seconds per epoch)
-        # Based on empirical data from beechnut (1.6B voxels)
-        beechnut_voxels = 1621098496  # Reference dataset
-        voxel_ratio = total_voxels / beechnut_voxels
+        # Create timing file path
+        timing_file = self.log_dir / f"test_epoch_timing_{run_index}.txt"
 
-        # Base time per epoch (calibrated from logs)
-        if "kan" in params.network_type:
-            # KAN: ~87-88 seconds per epoch for beechnut with simple network
-            base_time_per_epoch = 87.0 * voxel_ratio
-        else:  # mlp
-            # MLP: ~10-11 seconds per epoch for beechnut with simple network
-            base_time_per_epoch = 10.5 * voxel_ratio
+        script = f"""#!/bin/bash
+source /grand/insitu/cohanlon/miniconda3/etc/profile.d/conda.sh 
+cd /grand/insitu/cohanlon/kan_inr
+conda activate kan_inr
 
-        # Network complexity multiplier
-        # Simple network baseline: 1 hidden layer, 16 neurons
-        network_complexity = (params.n_hidden_layers * params.n_neurons) / 16.0
+export PBS_ARRAY_INDEX={run_index}
 
-        # Adjust for very complex networks (exponential scaling observed)
-        if params.n_hidden_layers >= 4:
-            network_complexity *= 1.5 ** (params.n_hidden_layers - 3)
+START_TIME=$(date +%s.%N)
 
-        # Hashmap size impact (exponential for large sizes)
-        hashmap_multiplier = 1.0
-        if params.log2_hashmap_size <= 14:
-            hashmap_multiplier = 1.0 + (params.log2_hashmap_size - 10) * 0.02
-        elif params.log2_hashmap_size <= 17:
-            hashmap_multiplier = 1.08 + (params.log2_hashmap_size - 14) * 0.05
-        else:  # h >= 18
-            # Significant jump observed for h>=18, especially with complex networks
-            hashmap_multiplier = 1.23 * (1.3 ** (params.log2_hashmap_size - 17))
+# Run single epoch benchmark
+python benchmark.py -cn config {override_str}
 
-        # Calculate total training time
-        time_per_epoch = base_time_per_epoch * network_complexity * hashmap_multiplier
-        training_time = time_per_epoch * params.epochs
+END_TIME=$(date +%s.%N)
+ELAPSED=$(echo "$END_TIME - $START_TIME" | bc)
 
-        # Add reconstruction and metric computation overhead (~5-10% of training)
-        total_time = training_time * 1.1
+echo "$ELAPSED" > {timing_file}
+"""
+        return script, timing_file
 
-        # Account for repeats
-        total_time *= self.cfg.repeats
+    def start_interactive_session(self, total_runs: int):
+        """Start an interactive PBS session in the background"""
+        # Calculate walltime for interactive session
+        minutes = round(total_runs * self.cfg.num_minutes_per_job)
+        hours = minutes // 60
+        remaining_minutes = minutes % 60
+        walltime = f"{hours:02d}:{remaining_minutes:02d}:00"
 
-        # Memory-based GPU allocation
-        # Estimate model memory footprint
-        hashmap_memory_gb = (
-            2**params.log2_hashmap_size
-            * params.n_features_per_level
-            * params.n_levels
-            * 2
-        ) / 1024**3
+        if self.verbose:
+            print(f"Waiting on interactive session with walltime {walltime}")
 
-        # Network parameter memory (rough estimate)
-        if "kan" in params.network_type:
-            # KAN networks use more memory per parameter
-            params_memory_gb = (params.n_neurons * params.n_hidden_layers * 100 * 4) / (
-                1024**3
+        if not self.dry_run:
+            # Start interactive session with pexpect
+            # (requires PTY which subprocess can't provide)
+            args = [
+                "-I",
+                "-A",
+                "insitu",
+                "-q",
+                "by-gpu",
+                "-l",
+                "select=1:ncpus=8:gputype=A100:system=sophia",
+                "-l",
+                "filesystems=home:grand",
+                "-l",
+                f"walltime={walltime}",
+            ]
+            self.interactive_session = pexpect.spawn(
+                "qsub", args, encoding="utf-8", timeout=None
             )
-        else:
-            params_memory_gb = (params.n_neurons * params.n_hidden_layers * 50 * 4) / (
-                1024**3
-            )
+            # Monitor until the interactive job starts (i.e., output contains "ready")
+            exit_code = self.interactive_session.expect("ready", timeout=None)
+            if exit_code != 0:
+                raise RuntimeError("Failed to start interactive session")
 
-        # Working memory for batch processing (includes gradients, optimizer state)
-        working_memory_gb = dataset_size_gb * 3  # Conservative estimate
+            if self.verbose:
+                print("Interactive session started")
 
-        # Total memory requirement
-        total_memory_gb = (
-            hashmap_memory_gb + params_memory_gb + working_memory_gb + 5
-        )  # +5GB overhead
+    def get_test_epoch_time(self, run_index: int, params: RunParams) -> float:
+        """Run a single epoch and return the time taken"""
+        # Check if we have cached timing results for this RunParams
+        if self.has_cached_timing(params):
+            key = self.get_timing_results_key(params)
+            cached_result = self.timing_results[key]
+            num_gpus = cached_result["num_gpus"]
+            epoch_time = cached_result["test_epoch_time"]
+            if self.verbose:
+                with self.print_lock:
+                    print(
+                        f"  Using cached timing: {epoch_time:.2f} seconds on {num_gpus} GPUs"
+                    )
+            return epoch_time
 
-        # Determine GPU count based on memory (A100 has 40GB)
-        memory_per_gpu = 35  # Conservative limit (leave headroom)
-        num_gpus = max(1, int(np.ceil(total_memory_gb / memory_per_gpu)))
+        if self.dry_run:
+            return 1.0  # Dummy time for dry run
 
-        if "kan" in params.network_type:
-            total_time *= 15  # KAN models are slower
-        else:
-            total_time *= 2  # MLP models are faster
+        # Create test_epoch script
+        script_content, timing_file = self.create_test_epoch_script(run_index, params)
 
+        # Write script to temporary file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
+            f.write(script_content)
+            script_path = f.name
+
+        try:
+            # Make script executable
+            os.chmod(script_path, 0o755)
+
+            # Run the test_epoch script in the interactive session
+            if self.interactive_session:
+                # Thread-safe access to interactive session
+                with self.interactive_session_lock:
+                    if self.verbose:
+                        with self.print_lock:
+                            print(f"  Running test epoch for job {run_index}...")
+
+                    # Send the script to the interactive session
+                    self.interactive_session.sendline(f"bash {script_path}\n")
+                    self.interactive_session.expect("\n", timeout=None)
+
+                    while not timing_file.exists():
+                        time.sleep(5)
+
+                    if timing_file.exists():
+                        with open(timing_file, "r") as f:
+                            elapsed_time = float(f.read().strip())
+
+                        # Clean up timing file
+                        timing_file.unlink()
+
+                        if self.verbose:
+                            with self.print_lock:
+                                print(
+                                    f"Test epoch for job {run_index} completed in {elapsed_time:.2f} seconds"
+                                )
+                    else:
+                        raise RuntimeError(
+                            f"Test epoch for job {run_index} did not complete in time"
+                        )
+
+                return elapsed_time
+
+            else:
+                raise RuntimeError("Interactive session is not active")
+        finally:
+            # Clean up script file
+            if os.path.exists(script_path):
+                os.unlink(script_path)
+
+    def get_walltime(self, params: RunParams, epoch_time: float) -> str:
+        """
+        Estimate walltime based on empirical test epoch timing.
+        """
+        # Calculate total estimated time
+        # NOTE: uses 0.8 b/c epoch_time includes other overhead so there is
+        # which adds padding to the estimate
+        total_time = 0.8 * params.epochs * self.cfg.repeats * epoch_time
+
+        # Adjust for extra GPUs based on time thresholds
+        num_gpus = 1
         seconds_per_hour = 3600
         if total_time > seconds_per_hour * 2:
             num_gpus = max(2, num_gpus)
@@ -240,6 +291,16 @@ class JobSubmissionManager:
             num_gpus = max(4, num_gpus)
         if total_time > seconds_per_hour * 8:
             num_gpus = 8
+
+        # Update memoization immediately when new results are added
+        key = self.get_timing_results_key(params)
+        with self.timing_results_lock:
+            self.timing_results[key] = {
+                "num_gpus": num_gpus,
+                "test_epoch_time": epoch_time,
+            }
+        if not self.dry_run:
+            self.save_timing_memoization()
 
         # Adjust time estimate for multi-GPU (not perfect scaling)
         if num_gpus > 1:
@@ -261,33 +322,17 @@ class JobSubmissionManager:
                 hours += minutes // 60
                 minutes = minutes % 60
 
-        # Cap at 24 hours and use appropriate format
+        # Cap at 24 hours
         if hours >= 24:
             walltime = "24:00:00"
         else:
             walltime = f"{hours:02d}:{minutes:02d}:00"
 
-        # Special cases for known difficult configurations
-        # Very complex KAN networks with large hashmaps
-        if (
-            "kan" in params.network_type
-            and params.n_hidden_layers >= 4
-            and params.log2_hashmap_size >= 18
-        ):
-            # These take 6000+ seconds empirically
-            if hours < 3:
-                walltime = "03:00:00"
-
-        # Quick MLP runs shouldn't request too much time
-        if params.network_type == "mlp" and params.n_hidden_layers <= 2:
-            if hours > 2:
-                walltime = "02:00:00"
-
         # Minimum walltime of 30 minutes for stability
         if hours == 0 and minutes < 30:
             walltime = "00:30:00"
 
-        return num_gpus, walltime
+        return walltime
 
     def generate_pbs_script(
         self,
@@ -299,11 +344,6 @@ class JobSubmissionManager:
         """Generate a customized PBS script for this specific job"""
         # Generate a descriptive job name (PBS limits to 15 chars)
         job_name = f"{params.network_type[:1]}_{params.dataset_name[:3]}_{run_index}"
-
-        if params.log2_hashmap_size > 0:
-            hashmap_size = "2^" + str(params.log2_hashmap_size)
-        else:
-            hashmap_size = "N/A"
 
         # Cast SubmissionConfig superclass to BenchmarkConfig for argument parsing
         submission_fields = {f.name for f in fields(SubmissionConfig)}
@@ -348,18 +388,8 @@ echo "  Walltime: {walltime}"
 echo "  System: sophia"
 echo "  Override args: {override_str}"
 echo "========================================="
-echo "Model Configuration:"
-echo "  Model type: {params.network_type}"
-echo "  Dataset: {params.dataset_name}"
-echo "  Hashmap size: {hashmap_size}"
-echo "  Epochs: {params.epochs}"
-echo "  Hidden layers: {params.n_hidden_layers}"
-echo "  Neurons per layer: {params.n_neurons}"
-echo "  Repeats: {self.cfg.repeats}"
-echo "========================================="
 echo "Starting at: $(date)"
 
-# Run the benchmark
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \\
     benchmark.py -cn config {override_str}
 
@@ -367,21 +397,45 @@ echo "Completed at: $(date)"
 """
         return script
 
-    def submit_job(self, run_index: int, params: RunParams) -> bool:
-        """Submit a single job and return success status"""
-        num_gpus, walltime = self.estimate_resources(params)
+    def submit_job_with_timing(
+        self,
+        run_index: int,
+        params: RunParams,
+        epoch_time: float,
+    ) -> bool:
+        """Submit a single job using empirical timing and return success status"""
+        # Get walltime given test epoch time
+        walltime = self.get_walltime(params, epoch_time)
+
+        # At this point num_gpus and walltime are known
+        if self.epoch_time_only:
+            if self.verbose:
+                with self.print_lock:
+                    key = self.get_timing_results_key(params)
+                    num_gpus = self.timing_results[key]["num_gpus"]
+                    print(
+                        f"Job {run_index}: Computed epoch time {epoch_time:.2f} seconds on {num_gpus} GPUs,"
+                        f"would request {walltime} walltime"
+                    )
+            return True
+
+        # Get GPU count from stored results
+        key = self.get_timing_results_key(params)
+        with self.timing_results_lock:
+            num_gpus = self.timing_results.get(key, {}).get("num_gpus", 1)
 
         data_shape, data_type = self.get_dataset_info(params.dataset_name)
 
         if self.verbose or self.dry_run:
-            print(f"\nJob {run_index}: {params.network_type} on {params.dataset_name}")
-            print(f"  Dataset shape: {data_shape} ({data_type})")
-            print(f"  Hashmap size: 2^{params.log2_hashmap_size}")
-            print(
-                f"  Network: {params.n_hidden_layers} layers x {params.n_neurons} neurons"
-            )
-            print(f"  Epochs: {params.epochs}, Repeats: {self.cfg.repeats}")
-            print(f"  Resources: {num_gpus} GPUs, {walltime} walltime")
+            with self.print_lock:
+                print(f"\nJob {run_index}:")
+                print(f"  Dataset shape: {data_shape} ({data_type})")
+                print("  Run Parameters:")
+                for field in fields(RunParams):
+                    value = getattr(params, field.name)
+                    print(f"    {field.name}: {value}")
+                print(f"  Test Epoch time: {epoch_time:.2f} seconds")
+                print(f"  Resources: {num_gpus} GPUs, {walltime} walltime")
 
         if self.dry_run:
             return True
@@ -401,12 +455,14 @@ echo "Completed at: $(date)"
             job_id = result.stdout.strip()
 
             if self.verbose:
-                print(f"  Submitted: {job_id}")
+                with self.print_lock:
+                    print(f"  Submitted: {job_id}")
 
             return True
 
         except subprocess.CalledProcessError as e:
-            print(f"ERROR submitting job {run_index}: {e.stderr}")
+            with self.print_lock:
+                print(f"ERROR submitting job {run_index}: {e.stderr}")
             return False
 
     def get_queued_jobs(self) -> int:
@@ -424,23 +480,70 @@ echo "Completed at: $(date)"
         except:
             return 0
 
-    def wait_for_slot(self, must_wait=False):
+    def wait_for_slot(self, must_wait=False, should_print=False):
         """Wait for a queue slot to become available"""
         while True:
             current_jobs = self.get_queued_jobs()
             if current_jobs < self.max_queued_jobs and not must_wait:
                 return
 
-            print(
-                f"Queue full ({current_jobs + 1}/{self.max_queued_jobs}). "
-                f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
-            )
+            if should_print:
+                with self.print_lock:
+                    print(
+                        f"Queue full ({current_jobs + 1}/{self.max_queued_jobs}). "
+                        f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
+                    )
             time.sleep(self.wait_time)
             must_wait = False  # Only force wait once
 
+    def test_epoch_and_submit_worker(self, work_queue: queue.Queue, worker_id: int = 0):
+        """Worker thread to process test epoch and submission tasks"""
+        while True:
+            try:
+                task = work_queue.get(timeout=1)
+                if task is None:  # Poison pill to stop worker
+                    break
+
+                run_index, params = task
+
+                try:
+                    epoch_time = self.get_test_epoch_time(run_index, params)
+
+                    # Only proceed if we got a valid epoch time
+                    if epoch_time > 0:
+                        # Submit job with empirical timing
+                        if not self.dry_run:
+                            self.wait_for_slot()
+
+                        success = False
+                        while not success:
+                            success = self.submit_job_with_timing(
+                                run_index, params, epoch_time
+                            )
+                            if not self.dry_run and not self.epoch_time_only:
+                                # If last submission failed, must wait before trying again
+                                must_wait = not success
+                                # Only first worker prints
+                                should_print = worker_id == 0
+                                self.wait_for_slot(must_wait, should_print)
+
+                        if not self.dry_run:
+                            time.sleep(1)  # Small delay to avoid overwhelming scheduler
+                    else:
+                        raise ValueError("Invalid epoch time")
+
+                except Exception as e:
+                    print(f"Failed to process job {run_index}: {e}, skipping job")
+
+                work_queue.task_done()
+
+            except queue.Empty:
+                continue
+            except Exception as e:
+                print(f"Error in worker thread: {e}")
+
     def run(self):
         """Main execution loop"""
-        # Use the parse_run_params function from benchmark.py
         runs_list = parse_run_params(self.cfg)
         total_runs = len(runs_list)
 
@@ -451,40 +554,76 @@ echo "Completed at: $(date)"
             print("No runs found with specified filters")
             return
 
+        # Filter by array_index_subset if specified
+        if self.cfg.array_index_subset is not None:
+            subset_runs = [
+                (i, r)
+                for i, r in enumerate(runs_list)
+                if i in self.cfg.array_index_subset
+            ]
+        else:
+            subset_runs = list(enumerate(runs_list))
+
+        actual_runs = len(subset_runs)
+
+        # Count how many runs have cached timing vs need computation
+        cached_count = sum(
+            1 for _, params in subset_runs if self.has_cached_timing(params)
+        )
+        new_count = actual_runs - cached_count
+
+        print(f"Timing status: {cached_count} cached, {new_count} to compute")
+
         # Print summary of datasets if verbose
         if self.verbose:
             datasets = set(r.dataset_name for r in runs_list)
             print(f"Datasets to process: {', '.join(sorted(datasets))}")
 
-        # Initialize counters
-        submitted = 0
-        failed = 0
+        # Start interactive session
+        if not self.dry_run:
+            self.start_interactive_session(actual_runs)
 
-        # Submit jobs
-        for run_index, params in enumerate(runs_list):
-            if self.cfg.array_index_subset is not None:
-                if run_index not in self.cfg.array_index_subset:
-                    if self.verbose:
-                        print(f"Skipping job {run_index} (not in subset)")
-                    continue
-            if not self.dry_run:
-                self.wait_for_slot()  # Check if max_queued_jobs is reached
+        # Create work queue
+        work_queue = queue.Queue()
 
-            success = False
-            while not success:  # Retry until successful
-                success = self.submit_job(run_index, params)
-                if not self.dry_run:
-                    self.wait_for_slot(must_wait=not success)
+        # Add all jobs to the queue
+        for run_index, params in subset_runs:
+            work_queue.put((run_index, params))
 
-            if not self.dry_run:
-                # Small delay to avoid overwhelming the scheduler
-                time.sleep(1)
+        # Start worker threads for concurrent test epoch and submission
+        num_workers = min(self.cfg.num_workers, actual_runs)
+        workers = []
 
+        for worker_id in range(num_workers):
+            worker = threading.Thread(
+                target=self.test_epoch_and_submit_worker, args=(work_queue, worker_id)
+            )
+            worker.start()
+            workers.append(worker)
+
+        # Wait for all tasks to complete
+        work_queue.join()
+
+        # Stop workers
+        for _ in range(num_workers):
+            work_queue.put(None)
+
+        for worker in workers:
+            worker.join()
+
+        # Close interactive session
+        if self.interactive_session:
+            try:
+                self.interactive_session.sendline("exit")
+                self.interactive_session.expect(pexpect.EOF, timeout=60)
+            except Exception:
+                self.interactive_session.close(force=True)
         # Final summary
         print("\n=== SUBMISSION SUMMARY ===")
         print(f"Total runs: {total_runs}")
-        print(f"Submitted: {submitted}")
-        print(f"Failed: {failed}")
+        print(f"Processed: {actual_runs}")
+        print(f"Timing results cached: {cached_count}")
+        print(f"New timing computations: {new_count}")
 
 
 # Register the config schema with Hydra as a structured config
@@ -502,7 +641,7 @@ def main(cfg: SubmissionConfig):
     if cfg.verbose:
         print("Submission Configuration:")
         print(f"  Max queued jobs: {cfg.max_jobs}")
-        print(f"  Wait time: {cfg.wait_time} seconds")
+        print(f"  Queue Job Wait time: {cfg.queue_job_wait_time} seconds")
         print(f"  Dry run: {cfg.dry_run}")
         print(f"  Verbose: {cfg.verbose}")
         if cfg.dataset:
