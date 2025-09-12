@@ -65,7 +65,7 @@ class BenchmarkConfig:
         hashmap_size: Filter to only use this specific log2 hashmap size
         epochs: Override epochs for all runs (uses params_file value if None)
         ssd_dir: Optional SSD directory for faster I/O during training
-        train_only: If True, only perform training without evaluation or saving
+        train_only: If True, only perform training without evaluation or saving (for timing runs)
     """
 
     params_file: str = "params"
