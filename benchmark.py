@@ -128,6 +128,7 @@ class RunParams:
         zfp_enc: ZFP compression parameter for encoder (unused in current implementation)
         zfp_mlp: ZFP compression parameter for MLP (unused in current implementation)
         kan_params: Optional dictionary of KAN-specific parameters
+        special_mode: Special mode for additional configurations e.g., SIREN, etc.
     """
 
     dataset_name: str
@@ -146,6 +147,7 @@ class RunParams:
     zfp_mlp: float
     log2_hashmap_size_step: int = 1
     kan_params: Optional[KANParams] = None
+    special_mode: Optional[str] = None
 
     # "None", "Sigmoid", "ReLU"
     activation: str = "ReLU"
@@ -161,10 +163,17 @@ class RunParams:
                 self.kan_params.grid_radius,
                 self.kan_params.num_grids,
                 self.kan_params.use_base_update,
+                # NOTE: may add ekan-specific params in future.
+                # But this isn't a problem b/c network_type="ekan" should
+                # hash differently anyway.
             ]
             if self.kan_params
             else []
         )
+
+        # Would be empty string if None so use "None"
+        special_mode = self.special_mode if self.special_mode else "None"
+
         config_tuple = (
             self.dataset_name,
             self.network_type,
@@ -179,6 +188,7 @@ class RunParams:
             self.base_resolution,
             self.activation,
             self.output_activation,
+            special_mode,
             *kan_params,
         )
         param_str = repr(config_tuple)
