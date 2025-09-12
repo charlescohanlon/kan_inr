@@ -78,7 +78,7 @@ class BenchmarkConfig:
     enable_pbar: bool = True
     repeats: int = 1
     save_mode: Optional[str] = None
-    safety_margin: float = 0.75
+    safety_margin: float = 0.8
     dataset: Optional[str] = None
     hashmap_size: Optional[int] = None
     epochs: Optional[int] = None
@@ -153,10 +153,17 @@ class RunParams:
     activation: str = "ReLU"
     output_activation: str = "None"
 
-    def __hash__(self):
+    def epoch_time_hash(
+        self, safety_margin: int, dataset_name: str, ssd_dir_provided: bool
+    ) -> int:
         """
-        Custom hash function for RunParams to uniquely identify configurations.
-        Only includes parameters relevant to training time, excluding those that don't affect it.
+        Custom hash function for a run's epoch time to uniquely identify configurations.
+        Considers parameters relevant to training epoch time, excluding those that don't affect it.
+
+        Args:
+            safety_margin: Safety margin for the configuration
+            dataset_name: Name of the dataset being used
+            ssd_dir_provided: Whether an SSD directory is provided for I/O
         """
         kan_params = (
             [
@@ -189,6 +196,9 @@ class RunParams:
             self.activation,
             self.output_activation,
             special_mode,
+            dataset_name,
+            safety_margin,
+            ssd_dir_provided,
             *kan_params,
         )
         param_str = repr(config_tuple)

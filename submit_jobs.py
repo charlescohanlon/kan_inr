@@ -3,8 +3,6 @@ import sys
 import subprocess
 import time
 import tempfile
-import threading
-import queue
 import pickle
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -60,7 +58,13 @@ class JobSubmissionManager:
         self.load_timing_memoization()
 
     def get_timing_results_key(self, params: RunParams) -> str:
-        return str(hash(params))  # See RunParams __hash__ method
+        """Get a unique key for timing results based on RunParams, safety margin, and dataset name."""
+        safety_margin = self.cfg.safety_margin
+        dataset_name = params.dataset_name
+        ssd_dir_provided = self.cfg.ssd_dir is not None
+        return str(
+            params.epoch_time_hash(safety_margin, dataset_name, ssd_dir_provided)
+        )
 
     def load_timing_memoization(self):
         """Load existing timing results from memoization file"""
@@ -485,6 +489,14 @@ cs.store(name="config", node=SubmissionConfig)
 @hydra.main(version_base="1.3", config_path="conf")
 def main(cfg: SubmissionConfig):
     """Main entry point with Hydra configuration"""
+
+    if cfg.batch_size is not None:
+        print("Warning: Overriding batch_size will affect timing estimate memoization.")
+    if cfg.safety_margin != BenchmarkConfig.safety_margin:
+        print(
+            f"Warning: Using non-default safety_margin ({cfg.safety_margin}) "
+            "will affect timing estimate memoization."
+        )
 
     if cfg.verbose:
         print("Submission Configuration:")
