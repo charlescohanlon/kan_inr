@@ -443,7 +443,11 @@ def run_benchmark(
 
         pbs_job_id = os.getenv("PBS_JOBID")
         pbs_array_index = os.getenv("PBS_ARRAY_INDEX", 0)
-        run_param_hash = hash(params)
+        run_param_hash = params.epoch_time_hash(
+            safety_margin=cfg.safety_margin,
+            dataset_name=params.dataset_name,
+            ssd_dir_provided=cfg.ssd_dir is not None,
+        )
 
         # Write results to CSV
         with open(output_path, "a") as f:
