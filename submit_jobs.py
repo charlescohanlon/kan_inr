@@ -1,10 +1,8 @@
 from contextlib import nullcontext
 import multiprocessing
 import os
-import sys
 import subprocess
 import time
-import tempfile
 import pickle
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -12,7 +10,6 @@ from dataclasses import dataclass, fields
 
 import hydra
 from hydra.core.config_store import ConfigStore
-from matplotlib.pylab import f
 
 from benchmark import BenchmarkConfig, RunParams, parse_run_params
 
@@ -30,6 +27,7 @@ class SubmissionConfig(BenchmarkConfig):
     num_minutes_per_job: float = 3  # Expected minutes per job for test epoch
     compute_epoch_time_only: bool = False
     num_workers: int = 4  # Number of parallel workers test_epoch test epochs
+    time_scaler: float = 0.9  # Scaling factor for estimated time
 
     # Directories for logs and memoization
     log_dir: Path = Path(BenchmarkConfig.home_dir) / "kan_inr" / "logs"
@@ -81,6 +79,19 @@ def save_test_epoch_memoization(
             return False
 
 
+def get_override_args(cfg: SubmissionConfig) -> List[str]:
+    """
+    Get command-line arguments for overriding default config values
+    by only including fields that exist in BenchmarkConfig.
+    """
+    submission_fields = {f.name for f in fields(SubmissionConfig)}
+    benchmark_fields = {f.name for f in fields(BenchmarkConfig)}
+    override_args = []
+    for key in submission_fields:
+        if key in benchmark_fields and cfg[key] is not None:
+            override_args.append(f'{key}={str(cfg[key]).replace(" ", "")}')
+
+
 def submit_test_epoch_job(
     cfg: SubmissionConfig, run_indices: List[int], worker_id: int, output_file: Path
 ) -> str:
@@ -90,20 +101,8 @@ def submit_test_epoch_job(
     walltime = f"{int(time_in_minutes // 60):02d}:{int(time_in_minutes % 60):02d}:00"
     job_name = f"te_w{worker_id}"
 
-    # Convert SubmissionConfig superclass to BenchmarkConfig for argument parsing
-    submission_fields = {f.name for f in fields(SubmissionConfig)}
-    test_epoch_fields = {f.name for f in fields(BenchmarkConfig)}
-    override_args = []
-    for key in submission_fields:
-        if key in test_epoch_fields and cfg[key] is not None:
-            # Override repeats to 1 for test epoch
-            if key == "repeats":
-                override_args.append("repeats=1")
-            else:
-                override_args.append(f'{key}={str(cfg[key]).replace(" ", "")}')
-
-    override_args.append("epochs=1")
-    override_args.append("train_only=True")
+    override_args = get_override_args(cfg)
+    override_args.append("test_epoch_run=True")
     override_str = " ".join(override_args).replace("'", '"')
 
     script = f"""#!/bin/bash
@@ -152,7 +151,7 @@ def get_pbs_walltime_and_gpus(
     # Calculate total estimated time
     # NOTE: epoch_time includes other overhead which pads the estimate
     # +1 for reconstruction overhead
-    total_time = (params.epochs + 1) * cfg.repeats * epoch_time
+    total_time = (params.epochs + 1) * cfg.repeats * epoch_time * cfg.time_scaler
 
     # Adjust for extra GPUs based on time thresholds
     num_gpus = 1
@@ -220,16 +219,27 @@ def submit_pbs_job(
     if cfg.dry_run:
         return "dry_run"
 
-    # Cast SubmissionConfig superclass to BenchmarkConfig for argument parsing
-    submission_fields = {f.name for f in fields(SubmissionConfig)}
-    benchmark_fields = {f.name for f in fields(BenchmarkConfig)}
-    override_args = []
-    for key in submission_fields:
-        # If key exists in BenchmarkConfig and is not None, add to overrides
-        if key in benchmark_fields and cfg[key] is not None:
-            override_args.append(f'{key}={str(cfg[key]).replace(" ", "")}')
-
+    # Get override args for submission script
+    override_args = get_override_args(cfg)
     override_str = " ".join(override_args).replace("'", '"')
+
+    params_file = (
+        cfg.params_file[: -len(".json")]
+        if cfg.params_file.endswith(".json")
+        else cfg.params_file
+    )
+    output_dir = cfg.log_dir / params_file
+    if not output_dir.exists():
+        output_dir /= "run_0"
+        output_dir.mkdir(parents=True)
+    else:
+        # Find next available run id
+        run_id = 1
+        while (output_dir / f"run_{run_id}").exists():
+            run_id += 1
+        output_dir /= f"run_{run_id}"
+        output_dir.mkdir()
+
     script = f"""#!/bin/bash
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
@@ -238,9 +248,8 @@ def submit_pbs_job(
 #PBS -l walltime={walltime}
 #PBS -l filesystems=home:grand
 #PBS -N {job_name}
-#PBS -o {cfg.log_dir}/
-#PBS -e {cfg.log_dir}/
-#PBS -m n
+#PBS -o {output_dir}
+#PBS -e {output_dir}
 # -----------------------------------
 
 # Job parameters
@@ -258,7 +267,6 @@ echo "  Host: $(hostname)"
 echo "  Job ID: $PBS_JOBID"
 echo "  Job Array Index: $PBS_ARRAY_INDEX"
 echo "  Number of GPUs detected: $NUM_GPUS"
-echo "  Requested GPUs: {num_gpus}"
 echo "  Walltime: {walltime}"
 echo "  System: sophia"
 echo "  Override args: {override_str}"
@@ -372,10 +380,10 @@ def compute_and_submit_job_worker(
                     test_epoch_dict[key] = time_elapsed
 
                 if not cfg.dry_run:
-                    if save_test_epoch_memoization(
+                    successfully_saved = save_test_epoch_memoization(
                         cfg, test_epoch_dict, test_epoch_lock
-                    ):
-                        # Successfully computed and saved test_epoch results
+                    )
+                    if successfully_saved:
                         with success_counter.get_lock():
                             success_counter.value += 1
 
