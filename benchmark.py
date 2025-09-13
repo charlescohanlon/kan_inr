@@ -6,7 +6,7 @@ representations on volumetric data, supporting both single-GPU and multi-GPU
 distributed training via PyTorch's DistributedDataParallel (DDP).
 """
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field
 from functools import partial
 import gc
 from typing import List, Optional, Tuple
@@ -16,12 +16,11 @@ import hydra
 from hydra.core.config_store import ConfigStore
 import numpy as np
 from omegaconf import OmegaConf
-from tqdm import tqdm, trange
+from tqdm import trange
 from time import time
 import math
 
 import torch
-import torch.nn as nn
 from torchmetrics.functional.image import structural_similarity_index_measure
 
 import os
@@ -1194,7 +1193,7 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                     "base_resolution must be an int or (int)cbrt(1<<log2_hashmap_size)"
                 )
 
-            log2_hashmap_size_step = param["log2_hashmap_size_step"]
+            log2_hashmap_size_step = param.get("log2_hashmap_size_step", 1)
 
             # Generate runs for all combinations
             for log2_hashmap_size in range(
