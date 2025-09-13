@@ -64,7 +64,7 @@ class BenchmarkConfig:
         hashmap_size: Filter to only use this specific log2 hashmap size
         epochs: Override epochs for all runs (uses params_file value if None)
         ssd_dir: Optional SSD directory for faster I/O during training
-        train_only: If True, only perform training without evaluation or saving (for timing runs)
+        test_epoch_run: If True, only run one epoch to estimate time (for job scheduling)
     """
 
     params_file: str = "params"
@@ -82,7 +82,7 @@ class BenchmarkConfig:
     hashmap_size: Optional[int] = None
     epochs: Optional[int] = None
     ssd_dir: Optional[str] = None
-    train_only: bool = False
+    test_epoch_run: bool = False
 
 
 @dataclass
@@ -311,6 +311,7 @@ def run_benchmark(
                 data_shape,
                 is_training=True,
                 optimizer=optimizer,
+                sampler=sampler,
                 safety_margin=cfg.safety_margin,
             )
             if is_main_process:
@@ -341,6 +342,10 @@ def run_benchmark(
                 rank=rank,
                 world_size=world_size,
             )
+
+            if cfg.test_epoch_run:
+                return  # Exit early if just testing epoch time
+
             durations.append(duration)
             if is_main_process:
                 print(
@@ -350,11 +355,6 @@ def run_benchmark(
                     f"Duration = {duration:.2f}sec"
                 )
             scheduler.step()  # Step the learning rate scheduler
-
-        if cfg.train_only:
-            if cfg.repeats > 1:
-                raise ValueError("train_only mode does not support repeats > 1")
-            return
 
         # Reconstruct and compute metrics when finished training
         # Only done on main process to avoid redundant computation
@@ -849,23 +849,23 @@ def calculate_batch_size(
     data_shape,
     is_training=True,
     optimizer=None,
+    sampler=None,
     min_batch=1,
     max_batch=10_000_000,
     safety_margin=0.99,
 ):
     """
     Automatically determine maximum batch size that fits in GPU memory.
-
-    Uses binary search to find the largest batch size that doesn't cause
-    out-of-memory errors. For INRs with coordinate inputs, batch sizes can
-    be very large (tens of thousands to millions).
+    Uses actual train() and reconstruct() functions to empirically test
+    batch sizes rather than simulating memory usage.
 
     Args:
         model: The INR model to test
         device: Device to test on (CPU or CUDA)
         data_shape: Shape of the data (for reconstruction memory estimation)
         is_training: Whether to test training (with gradients) or inference
-        optimizer: Optimizer to test with (for training memory estimation)
+        optimizer: Optimizer to test with (required for training)
+        sampler: VolumeSampler for training tests (required for training)
         min_batch: Minimum batch size to consider
         max_batch: Maximum batch size to consider
         safety_margin: Safety factor to apply to final batch size (0-1)
@@ -876,120 +876,189 @@ def calculate_batch_size(
     if device.type != "cuda":
         return 100_000  # Reasonable default for CPU
 
-    # Clear cache before testing
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    # Validation
+    if is_training and (optimizer is None or sampler is None):
+        raise ValueError(
+            "Optimizer and sampler required for training batch size calculation"
+        )
 
-    # First, do a coarse search to find the right order of magnitude
-    # Test exponentially increasing batch sizes
-    test_sizes = [100, 1_000, 10_000, 50_000, 100_000, 500_000, 1_000_000, 5_000_000]
-    working_batch = 1
+    # Save original states on cpu to restore later
+    original_model_state = {k: v.clone().cpu() for k, v in model.state_dict().items()}
+    original_optimizer_state = None
+    if optimizer is not None:
+        original_optimizer_state = optimizer.state_dict()
 
-    for test_batch in test_sizes:
-        try:
-            torch.cuda.empty_cache()
-            # Create test input: batch of 3D coordinates
-            test_input = torch.randn(test_batch, 3, device=device, dtype=torch.float32)
+    try:
+        # First, do a coarse search to find the right order of magnitude
+        test_sizes = [
+            100,
+            1_000,
+            10_000,
+            50_000,
+            100_000,
+            500_000,
+            1_000_000,
+            5_000_000,
+        ]
+        working_batch = 1
 
-            if is_training:
-                # Test training memory requirements
-                output = model(test_input)
-                loss = output.mean()
-                loss.backward()
-                model.zero_grad()
-            else:
-                # Test inference memory requirements
-                with torch.no_grad():
-                    output = model(test_input)
-
-            working_batch = test_batch
-            # Clean up test tensors
-            del test_input, output
-            if is_training:
-                del loss
-
-        except RuntimeError as e:
-            if "out of memory" in str(e) or "CUDA" in str(e):
+        for test_batch in test_sizes:
+            try:
                 torch.cuda.empty_cache()
-                break  # Found the limit
-            else:
-                raise e
+                torch.cuda.synchronize()
 
-    # Now binary search between working_batch and the next level up
-    if working_batch == test_sizes[-1]:
-        # We succeeded at the highest test, search higher
-        min_batch = working_batch
-        max_batch = max_batch
-    else:
-        # Search between working and failed size
-        min_batch = working_batch
-        max_batch = working_batch * 10
+                if is_training:
+                    # Run one train step
+                    optimizer.zero_grad()
 
-    # Binary search for the optimal batch size
-    best_batch = working_batch
+                    # Sample real data
+                    with torch.no_grad():
+                        coords, targets = sampler.get_random_samples(test_batch)
 
-    while min_batch <= max_batch:
-        mid_batch = (min_batch + max_batch) // 2
+                    # Forward pass
+                    values = model(coords)
+                    loss = torch.nn.L1Loss()(values, targets)
 
-        # Skip if we've already tested something very close
-        if abs(mid_batch - best_batch) < best_batch * 0.01:  # Within 1%
-            break
-
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-
-            # Test this batch size
-            test_input = torch.randn(mid_batch, 3, device=device, dtype=torch.float32)
-
-            if is_training:
-                # Full training step test
-                output = model(test_input)
-                loss = output.mean()
-                loss.backward()
-
-                if optimizer:
+                    # Backward pass
+                    loss.backward()
                     optimizer.step()
                     optimizer.zero_grad()
+
+                    # Clean up
+                    del coords, targets, values, loss
                 else:
-                    model.zero_grad()
-            else:
-                with torch.no_grad():
-                    output = model(test_input)
-
-                    # For eval, test reconstruction tensor allocation periodically
-                    if mid_batch > best_batch * 1.5:  # Significant increase
-                        # Test if we can allocate the reconstruction tensor
-                        test_reconst = torch.zeros(
-                            data_shape, device=device, dtype=torch.float32
+                    # Test reconstruction with actual function logic
+                    with torch.no_grad():
+                        # Generate test coordinates like reconstruct() does
+                        test_coords = torch.rand(
+                            test_batch, 3, device=device, dtype=torch.float32
                         )
-                        del test_reconst
 
-            # Success! Try larger batch
-            best_batch = mid_batch
-            min_batch = mid_batch + 1
+                        # Forward pass
+                        output = model(test_coords)
 
-            # Cleanup
-            del test_input, output
-            if is_training:
-                del loss
+                        # Also test if we can allocate reconstruction tensor
+                        if test_batch > 100_000:  # Only test for larger batches
+                            test_reconst = torch.zeros(
+                                data_shape, device=device, dtype=torch.float32
+                            )
+                            del test_reconst
 
-        except RuntimeError as e:
-            if "out of memory" in str(e) or "CUDA" in str(e):
-                # Failed, try smaller batch
-                max_batch = mid_batch - 1
+                        del test_coords, output
+
+                working_batch = test_batch
+
+            except RuntimeError as e:
+                if "out of memory" in str(e) or "CUDA" in str(e):
+                    torch.cuda.empty_cache()
+                else:
+                    raise e
+
+        # Now binary search between working_batch and the next level up
+        if working_batch == test_sizes[-1]:
+            # We succeeded at the highest test, search higher
+            min_batch = working_batch
+            max_batch = max_batch
+        else:
+            # Search between working and failed size
+            min_batch = working_batch
+            max_batch = min(working_batch * 10, max_batch)
+
+        # Binary search for the optimal batch size
+        best_batch = working_batch
+
+        while min_batch <= max_batch:
+            mid_batch = (min_batch + max_batch) // 2
+
+            # Skip if we've already tested something very close
+            if abs(mid_batch - best_batch) < best_batch * 0.01:  # Within 1%
+                break
+
+            try:
                 torch.cuda.empty_cache()
-            else:
-                raise e
+                torch.cuda.synchronize()
 
-    # KAN networks need more memory headroom
-    if model.network_type.lower() == "kan":
-        safety_margin *= 0.75
+                if is_training:
+                    # Run training step
+                    optimizer.zero_grad()
 
-    # Apply safety margin to avoid occasional OOM during actual training
+                    with torch.no_grad():
+                        coords, targets = sampler.get_random_samples(mid_batch)
+
+                    values = model(coords)
+                    loss = torch.nn.L1Loss()(values, targets)
+                    loss.backward()
+                    optimizer.step()
+
+                    # Success!
+                    best_batch = mid_batch
+                    min_batch = mid_batch + 1
+
+                    # Clean up
+                    del coords, targets, values, loss
+                    optimizer.zero_grad()
+                else:
+                    # Test reconstruction
+                    with torch.no_grad():
+                        # Simulate reconstruct() function's memory usage
+                        # Generate coordinates
+                        num_test_coords = min(mid_batch, np.prod(data_shape))
+                        test_coords = torch.rand(
+                            num_test_coords, 3, device=device, dtype=torch.float32
+                        )
+
+                        # Forward pass
+                        output = model(test_coords)
+
+                        # Test intermediate storage (simulating reconst_list)
+                        # reconstruct() stores outputs on CPU then moves back
+                        cpu_output = output.cpu()
+
+                        # Test if we can allocate the full reconstruction tensor
+                        # This is critical for the reconstruct function
+                        if mid_batch > best_batch * 1.2:  # Significant increase
+                            test_reconst = torch.zeros(
+                                data_shape, device=device, dtype=torch.float32
+                            )
+                            del test_reconst
+
+                        # Success!
+                        best_batch = mid_batch
+                        min_batch = mid_batch + 1
+
+                        # Clean up
+                        del test_coords, output, cpu_output
+
+            except RuntimeError as e:
+                if "out of memory" in str(e) or "CUDA" in str(e):
+                    # Failed, try smaller batch
+                    max_batch = mid_batch - 1
+                    torch.cuda.empty_cache()
+                else:
+                    raise e
+
+    finally:
+        # Move model state back to original device
+        original_model_state = {
+            k: v.to(device) for k, v in original_model_state.items()
+        }
+
+        # Restore original states
+        model.load_state_dict(original_model_state)
+        if optimizer is not None and original_optimizer_state is not None:
+            optimizer.load_state_dict(original_optimizer_state)
+
+        # Clean up the saved states
+        del original_model_state
+        if original_optimizer_state is not None:
+            del original_optimizer_state
+
+        torch.cuda.empty_cache()
+
+    # Apply safety margin to avoid occasional OOM during actual usage
     final_batch = max(1, int(best_batch * safety_margin))
 
-    # Quick sanity check - if we're getting a tiny batch size for an INR, something's wrong
+    # Sanity check
     if final_batch < 1000 and device.type == "cuda":
         print(
             f"Warning: Unexpectedly small batch size {final_batch} for INR on GPU. "
