@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+import multiprocessing
 import os
 import sys
 import subprocess
@@ -10,6 +12,7 @@ from dataclasses import dataclass, fields
 
 import hydra
 from hydra.core.config_store import ConfigStore
+from matplotlib.pylab import f
 
 from benchmark import BenchmarkConfig, RunParams, parse_run_params
 
@@ -24,101 +27,86 @@ class SubmissionConfig(BenchmarkConfig):
     dry_run: bool = False
     verbose: bool = False
     array_index_subset: Optional[List[int]] = None
-    num_minutes_per_job: float = 3
+    num_minutes_per_job: float = 3  # Expected minutes per job for test epoch
     compute_epoch_time_only: bool = False
+    num_workers: int = 4  # Number of parallel workers test_epoch test epochs
+
+    # Directories for logs and memoization
+    log_dir: Path = Path(BenchmarkConfig.home_dir) / "kan_inr" / "logs"
+    memo_dir: Path = Path(BenchmarkConfig.home_dir) / "memo"
+    test_epoch_dir: Path = log_dir / "test_epochs"
+
+    test_epoch_memo_file: Path = memo_dir / "test_epoch_memo.pkl"
 
 
-class JobSubmissionManager:
-    def __init__(self, cfg: SubmissionConfig):
-        self.cfg = cfg
-        self.max_queued_jobs = cfg.max_jobs
-        self.wait_time = cfg.wait_time
-        self.dry_run = cfg.dry_run
-        self.verbose = cfg.verbose
-        self.home_dir = Path(cfg.home_dir)
-        self.array_index_subset = cfg.array_index_subset
-        self.num_minutes_per_job = cfg.num_minutes_per_job
-
-        # Directories for logs and memoization
-        self.log_dir = self.home_dir / "kan_inr" / "logs"
-        self.memo_dir = self.home_dir / "memo"
-        self.test_epoch_dir = self.log_dir / "test_epochs"
-        self.memo_dir.mkdir(parents=True, exist_ok=True)
-        self.log_dir.mkdir(parents=True, exist_ok=True)
-        self.test_epoch_dir.mkdir(parents=True, exist_ok=True)
-
-        # Only empirically compute epoch times (no submission)
-        self.compute_epoch_time_only = cfg.compute_epoch_time_only
-
-        # For storing test epoch timing results
-        self.epoch_timing_results = {}
-
-        # Memoization file for timing results
-        self.timing_memo_file = self.memo_dir / "epoch_timing_memo.pkl"
-        self.load_timing_memoization()
-
-    def get_timing_results_key(self, params: RunParams) -> str:
-        """Get a unique key for timing results based on RunParams, safety margin, and dataset name."""
-        safety_margin = self.cfg.safety_margin
-        dataset_name = params.dataset_name
-        ssd_dir_provided = self.cfg.ssd_dir is not None
-        return str(
-            params.epoch_time_hash(safety_margin, dataset_name, ssd_dir_provided)
+def get_test_epoch_key(cfg: SubmissionConfig, params: RunParams) -> str:
+    """Get a unique key for test epoch results."""
+    return str(
+        params.epoch_time_hash(
+            safety_margin=cfg.safety_margin,
+            dataset_name=params.dataset_name,
+            ssd_dir_provided=cfg.ssd_dir is not None,
         )
+    )
 
-    def load_timing_memoization(self):
-        """Load existing timing results from memoization file"""
-        if self.timing_memo_file.exists():
-            try:
-                with open(self.timing_memo_file, "rb") as f:
-                    self.epoch_timing_results = pickle.load(f)
-            except (pickle.PickleError, FileNotFoundError, EOFError) as e:
-                print(f"Warning: Could not load timing memoization file: {e}")
-                self.epoch_timing_results = {}
-        else:
-            self.epoch_timing_results = {}
 
-    def save_timing_memoization(self):
-        """Save timing results to memoization file"""
+def load_test_epoch_memoization(cfg: SubmissionConfig) -> dict:
+    """Load existing test epoch results from memoization file"""
+    memo_file_path = cfg.test_epoch_memo_file
+    if memo_file_path.exists():
+        if cfg.verbose:
+            print(f"Loading test epochs from {memo_file_path}")
         try:
-            with open(self.timing_memo_file, "wb") as f:
-                pickle.dump(self.epoch_timing_results, f)
+            with open(memo_file_path, "rb") as f:
+                return pickle.load(f)
+        except (pickle.PickleError, FileNotFoundError, EOFError) as e:
+            print(f"Warning: could not load test epoch memoization file: {e}")
+            return {}
+    if cfg.verbose:
+        print(f"No test epoch memoization file found at {memo_file_path}")
+    return {}
+
+
+def save_test_epoch_memoization(
+    cfg: SubmissionConfig, test_epoch_dict_proxy, test_epoch_lock
+) -> bool:
+    """Save test_epoch results to memoization file when new ones computed"""
+    with test_epoch_lock:
+        try:
+            with open(cfg.test_epoch_memo_file, "wb") as f:
+                pickle.dump(dict(test_epoch_dict_proxy), f)
+            return True
         except (pickle.PickleError, OSError) as e:
-            print(f"Warning: Could not save timing memoization file: {e}")
+            print(f"Warning: Could not save test epoch memoization file: {e}")
+            return False
 
-    def has_cached_timing(self, params: RunParams) -> bool:
-        """Check if timing results exist for given RunParams"""
-        key = self.get_timing_results_key(params)
-        return key in self.epoch_timing_results
 
-    def create_test_epoch_script(self, run_indices: List[int]) -> Tuple[str, Path]:
-        """Create a bash script for testing single epochs"""
-        # Estimate walltime for test epoch runs
-        time_in_minutes = len(run_indices) * self.num_minutes_per_job
-        walltime = (
-            f"{int(time_in_minutes // 60):02d}:{int(time_in_minutes % 60):02d}:00"
-        )
-        job_name = "test_epochs"
+def submit_test_epoch_job(
+    cfg: SubmissionConfig, run_indices: List[int], worker_id: int, output_file: Path
+) -> str:
+    """Create a bash script for testing single epochs"""
+    # Estimate walltime for test epoch runs
+    time_in_minutes = len(run_indices) * cfg.num_minutes_per_job
+    walltime = f"{int(time_in_minutes // 60):02d}:{int(time_in_minutes % 60):02d}:00"
+    job_name = f"te_w{worker_id}"
 
-        # Convert SubmissionConfig superclass to BenchmarkConfig for argument parsing
-        submission_fields = {f.name for f in fields(SubmissionConfig)}
-        test_epoch_fields = {f.name for f in fields(BenchmarkConfig)}
-        override_args = []
-        for key in submission_fields:
-            if key in test_epoch_fields and self.cfg[key] is not None:
-                # Override repeats to 1 for test epoch
-                if key == "repeats":
-                    override_args.append("repeats=1")
-                else:
-                    override_args.append(f'{key}={str(self.cfg[key]).replace(" ", "")}')
+    # Convert SubmissionConfig superclass to BenchmarkConfig for argument parsing
+    submission_fields = {f.name for f in fields(SubmissionConfig)}
+    test_epoch_fields = {f.name for f in fields(BenchmarkConfig)}
+    override_args = []
+    for key in submission_fields:
+        if key in test_epoch_fields and cfg[key] is not None:
+            # Override repeats to 1 for test epoch
+            if key == "repeats":
+                override_args.append("repeats=1")
+            else:
+                override_args.append(f'{key}={str(cfg[key]).replace(" ", "")}')
 
-        override_args.append("epochs=1")
-        override_args.append("train_only=True")
-        override_str = " ".join(override_args).replace("'", '"')
+    override_args.append("epochs=1")
+    override_args.append("train_only=True")
+    override_str = " ".join(override_args).replace("'", '"')
 
-        timing_file = self.test_epoch_dir / "test_epoch_timings.txt"
-
-        script = f"""#!/bin/bash
+    script = f"""#!/bin/bash
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
 #PBS -q by-gpu
@@ -126,8 +114,8 @@ class JobSubmissionManager:
 #PBS -l walltime={walltime}
 #PBS -l filesystems=home:grand
 #PBS -N {job_name}
-#PBS -o {self.test_epoch_dir}
-#PBS -e {self.test_epoch_dir}
+#PBS -o /dev/null
+#PBS -e /dev/null
 #PBS -m n
 # -----------------------------------
 
@@ -139,108 +127,110 @@ for run_index in {' '.join(map(str, run_indices))}; do
     PBS_ARRAY_INDEX=$run_index python benchmark.py -cn config {override_str}
     END_TIME=$(date +%s.%N)
     ELAPSED=$(echo "$END_TIME - $START_TIME" | bc)
-    echo "run_index: $run_index, time_elapsed: $ELAPSED" >> {timing_file}
+    echo "run_index: $run_index, time_elapsed: $ELAPSED" >> {output_file}
 done
 """
-        return script, timing_file
+    # Submit script to PBS
+    result = subprocess.run(
+        ["qsub"],
+        input=script,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    job_id = result.stdout.strip()
 
-    def start_test_epoch_script(self, script_content: str) -> str:
-        """Submit the test epoch script to PBS and return the job ID"""
-        # Write script to temporary file
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
-            f.write(script_content)
-            script_path = f.name
+    return job_id
 
-        # Make script executable
-        os.chmod(script_path, 0o755)
 
-        # Submit script to PBS
-        result = subprocess.run(
-            ["qsub", script_path],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        job_id = result.stdout.strip()
+def get_pbs_walltime_and_gpus(
+    cfg: SubmissionConfig, params: RunParams, epoch_time: float
+) -> str:
+    """
+    Estimate walltime based on empirical test epoch results.
+    """
+    # Calculate total estimated time
+    # NOTE: epoch_time includes other overhead which pads the estimate
+    # +1 for reconstruction overhead
+    total_time = (params.epochs + 1) * cfg.repeats * epoch_time
 
-        if self.verbose:
-            print(f"Submitted test epoch script as job {job_id}")
+    # Adjust for extra GPUs based on time thresholds
+    num_gpus = 1
+    seconds_per_hour = 3600
+    if total_time > seconds_per_hour * 2:
+        num_gpus = max(2, num_gpus)
+    if total_time > seconds_per_hour * 4:
+        num_gpus = max(4, num_gpus)
+    if total_time > seconds_per_hour * 8:
+        num_gpus = 8
 
-        return job_id
+    # Adjust time estimate for multi-GPU (not perfect scaling)
+    if num_gpus > 1:
+        # Assume 80% scaling efficiency per additional GPU
+        scaling_factor = 1 + (num_gpus - 1) * 0.8
+        total_time = total_time / scaling_factor
 
-    def get_walltime_and_gpus(self, params: RunParams, epoch_time: float) -> str:
-        """
-        Estimate walltime based on empirical test epoch timing.
-        """
-        # Calculate total estimated time
-        # NOTE: epoch_time includes other overhead which pads the estimate
-        # +1 for reconstruction overhead
-        total_time = (params.epochs + 1) * self.cfg.repeats * epoch_time
+    # Convert to walltime string with appropriate padding
+    hours = int(total_time // 3600)
+    minutes = int((total_time % 3600) // 60)
+    seconds = int(total_time % 60)
 
-        # Adjust for extra GPUs based on time thresholds
-        num_gpus = 1
-        seconds_per_hour = 3600
-        if total_time > seconds_per_hour * 2:
-            num_gpus = max(2, num_gpus)
-        if total_time > seconds_per_hour * 4:
-            num_gpus = max(4, num_gpus)
-        if total_time > seconds_per_hour * 8:
-            num_gpus = 8
+    # Round up to next 15-minute increment for scheduler efficiency
+    if seconds > 0:
+        minutes += 1
+    if minutes % 15 != 0:
+        minutes = ((minutes // 15) + 1) * 15
+        if minutes >= 60:
+            hours += minutes // 60
+            minutes = minutes % 60
 
-        # Adjust time estimate for multi-GPU (not perfect scaling)
-        if num_gpus > 1:
-            # Assume 80% scaling efficiency per additional GPU
-            scaling_factor = 1 + (num_gpus - 1) * 0.8
-            total_time = total_time / scaling_factor
+    # Cap at 24 hours
+    if hours >= 24:
+        walltime = "24:00:00"
+    else:
+        walltime = f"{hours:02d}:{minutes:02d}:00"
 
-        # Convert to walltime string with appropriate padding
-        hours = int(total_time // 3600)
-        minutes = int((total_time % 3600) // 60)
-        seconds = int(total_time % 60)
+    # Minimum walltime of 30 minutes for stability
+    if hours == 0 and minutes < 30:
+        walltime = "00:30:00"
 
-        # Round up to next 15-minute increment for scheduler efficiency
-        if seconds > 0:
-            minutes += 1
-        if minutes % 15 != 0:
-            minutes = ((minutes // 15) + 1) * 15
-            if minutes >= 60:
-                hours += minutes // 60
-                minutes = minutes % 60
+    return walltime, num_gpus
 
-        # Cap at 24 hours
-        if hours >= 24:
-            walltime = "24:00:00"
-        else:
-            walltime = f"{hours:02d}:{minutes:02d}:00"
 
-        # Minimum walltime of 30 minutes for stability
-        if hours == 0 and minutes < 30:
-            walltime = "00:30:00"
+def submit_pbs_job(
+    cfg: SubmissionConfig,
+    run_index: int,
+    params: RunParams,
+    epoch_time: float,
+    print_lock=None,
+) -> str:
+    walltime, num_gpus = get_pbs_walltime_and_gpus(cfg, params, epoch_time)
+    job_name = f"{params.network_type[:1]}_{params.dataset_name[:3]}_{run_index}"
 
-        return walltime, num_gpus
+    with print_lock or nullcontext():
+        print(f"\nJob {run_index}:")
+        print("  Run Parameters")
+        for field in fields(RunParams):
+            value = getattr(params, field.name)
+            print(f"    {field.name}: {value}")
+        print(f"  Test epoch time: {epoch_time:.2f} seconds")
+        print(f"  Resources: {num_gpus} GPUs, {walltime} walltime")
+        print(f"  Job name: {job_name}")
 
-    def generate_pbs_script(
-        self,
-        run_index: int,
-        params: RunParams,
-        walltime: str,
-        num_gpus: int = 1,
-    ) -> str:
-        """Generate a customized PBS script for this specific job"""
-        # Generate a descriptive job name (PBS limits to 15 chars)
-        job_name = f"{params.network_type[:1]}_{params.dataset_name[:3]}_{run_index}"
+    if cfg.dry_run:
+        return "dry_run"
 
-        # Cast SubmissionConfig superclass to BenchmarkConfig for argument parsing
-        submission_fields = {f.name for f in fields(SubmissionConfig)}
-        benchmark_fields = {f.name for f in fields(BenchmarkConfig)}
-        override_args = []
-        for key in submission_fields:
-            # If key exists in BenchmarkConfig and is not None, add to overrides
-            if key in benchmark_fields and self.cfg[key] is not None:
-                override_args.append(f'{key}={str(self.cfg[key]).replace(" ", "")}')
+    # Cast SubmissionConfig superclass to BenchmarkConfig for argument parsing
+    submission_fields = {f.name for f in fields(SubmissionConfig)}
+    benchmark_fields = {f.name for f in fields(BenchmarkConfig)}
+    override_args = []
+    for key in submission_fields:
+        # If key exists in BenchmarkConfig and is not None, add to overrides
+        if key in benchmark_fields and cfg[key] is not None:
+            override_args.append(f'{key}={str(cfg[key]).replace(" ", "")}')
 
-        override_str = " ".join(override_args).replace("'", '"')
-        script = f"""#!/bin/bash
+    override_str = " ".join(override_args).replace("'", '"')
+    script = f"""#!/bin/bash
 # ---------- PBS DIRECTIVES ----------
 #PBS -A insitu
 #PBS -q by-gpu
@@ -248,16 +238,16 @@ done
 #PBS -l walltime={walltime}
 #PBS -l filesystems=home:grand
 #PBS -N {job_name}
-#PBS -o {self.log_dir}/
-#PBS -e {self.log_dir}/
+#PBS -o {cfg.log_dir}/
+#PBS -e {cfg.log_dir}/
 #PBS -m n
 # -----------------------------------
 
 # Job parameters
 export PBS_ARRAY_INDEX={run_index}
 
-source {self.home_dir}/miniconda3/etc/profile.d/conda.sh 
-cd {self.home_dir}/kan_inr
+source {cfg.home_dir}/miniconda3/etc/profile.d/conda.sh
+cd {cfg.home_dir}/kan_inr
 conda activate kan_inr
 
 # Get the number of GPUs
@@ -280,203 +270,130 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \\
 
 echo "Completed at: $(date)"
 """
-        return script
 
-    def submit_job(
-        self,
-        run_index: int,
-        params: RunParams,
-        walltime: str,
-        num_gpus: int = 1,
-    ):
-        """Submit a job to the PBS scheduler"""
-        # Generate PBS script to submit job
-        script_content = self.generate_pbs_script(run_index, params, walltime, num_gpus)
-
-        # Submit via stdin to qsub, wait for success (will fail if queue is full)
-        while True:
-            try:
-                self.wait_for_slot()
-                result = subprocess.run(
-                    ["qsub"],
-                    input=script_content,
-                    text=True,
-                    capture_output=True,
-                    check=True,  # Raise error on non-zero exit code
-                )
-
-                if self.verbose:
-                    job_id = result.stdout.strip()
-                    print(f"  Submitted: {job_id}")
-
-                return
-            except subprocess.CalledProcessError as e:
-                self.wait_for_slot(must_wait=True)
-
-    def get_queued_jobs(self) -> int:
-        """Get the current number of queued jobs for the user"""
-        try:
-            result = subprocess.run(
-                ["qstat", "-u", os.environ.get("USER", "")],
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            # Count non-header lines
-            lines = result.stdout.strip().split("\n")
-            return max(0, len(lines) - 5)  # Skip header lines
-        except:
-            return 0
-
-    def wait_for_slot(self, must_wait=False):
+    def _wait_for_slot(must_wait=False):
         """Wait for a queue slot to become available"""
+
         while True:
-            current_jobs = self.get_queued_jobs()
-            if current_jobs < self.max_queued_jobs and not must_wait:
+            current_jobs = get_queued_jobs()
+            if current_jobs < cfg.max_jobs and not must_wait:
                 return
 
-            print(
-                f"{current_jobs} are currently queued. "
-                f"Waiting {self.wait_time / 60:.1f} minutes before retrying..."
-            )
-            time.sleep(self.wait_time)
+            time.sleep(cfg.wait_time)
             must_wait = False  # Only force wait once
 
-    def run(self):
-        """Main execution loop"""
-        runs_list = parse_run_params(self.cfg)
-        total_runs = len(runs_list)
-
-        print(f"Total runs to submit: {total_runs}")
-        print(f"Repeats per run: {self.cfg.repeats}")
-
-        if total_runs == 0:
-            print("No runs found with specified filters")
-            return
-
-        # Filter by array_index_subset if specified
-        if self.array_index_subset is not None:
-            runs_list = [
-                (i, r) for i, r in enumerate(runs_list) if i in self.array_index_subset
-            ]
-        else:
-            runs_list = list(enumerate(runs_list))
-
-        # Summary of datasets to process
-        if self.verbose:
-            datasets = set(r.dataset_name for _, r in runs_list)
-            print(f"Datasets to process: {', '.join(sorted(datasets))}")
-
-        cached_runs, compute_runs = [], []
-        for run_index, params in runs_list:
-            if self.has_cached_timing(params):
-                cached_runs.append((run_index, params))
-            else:
-                compute_runs.append((run_index, params))
-
-        num_caches, num_compute = len(cached_runs), len(compute_runs)
-        print(f"Timing status: {num_caches} cached, {num_compute} to compute")
-
-        def _submit(i: int, p: RunParams):
-            key = self.get_timing_results_key(p)
-            time_elapsed = self.epoch_timing_results[key]
-            walltime, num_gpus = self.get_walltime_and_gpus(p, time_elapsed)
-
-            if self.verbose or self.dry_run:
-                print(f"\nJob {i}:")
-                print("  Run Parameters")
-                for field in fields(RunParams):
-                    value = getattr(p, field.name)
-                    print(f"    {field.name}: {value}")
-                print(f"  Epoch time: {time_elapsed:.2f} seconds")
-                print(f"  Resources: {num_gpus} GPUs, {walltime} walltime")
-
-            if not self.dry_run:
-                self.submit_job(i, p, walltime, num_gpus)
-
-        def _summary(computed_completed=num_compute):
-            print("\n=== SUBMISSION SUMMARY ===")
-            print(f"Total runs: {num_caches + computed_completed}")
-            print(f"Timing results from cached: {num_caches}")
-            print(f"Timing results computed: {computed_completed}")
-
-        # First submit cached runs
-        for run_index, params in cached_runs:
-            if self.verbose:
-                print("\nSubmitting cached run:")
-            _submit(run_index, params)
-
-        if num_compute == 0:
-            _summary()
-            return
-
-        job_id = None
-        jobs_run = set()
+    # Submit via stdin to qsub, wait for success (will fail if queue is full)
+    while True:
         try:
-            # Then submit the test epoch script for runs needing timing
-            compute_indices = [i for i, _ in compute_runs]
-            script_content, timing_file = self.create_test_epoch_script(compute_indices)
-
-            if not self.dry_run:
-                job_id = self.start_test_epoch_script(script_content)
-
-                # Timing file exists when first run completes
-                while not timing_file.exists():
-                    time.sleep(30)
-            else:
-                # In dry run mode, create a fake timing file
-                create_dry_run_timing_file(timing_file, compute_indices)
-
-            while len(jobs_run) < len(compute_indices):
-                with open(timing_file, "r") as f:
-                    lines = f.readlines()
-
-                for line in lines:
-                    if not "run_index" in line or not "time_elapsed" in line:
-                        continue
-
-                    parts = line.strip().split(",")
-                    run_index = int(parts[0].split(":")[1].strip())
-                    time_elapsed = float(parts[1].split(":")[1].strip())
-                    # Find corresponding RunParams
-                    params = next(p for i, p in compute_runs if i == run_index)
-
-                    # Timing results now known, save them
-                    key = self.get_timing_results_key(params)
-                    self.epoch_timing_results[key] = time_elapsed
-                    if not self.dry_run:
-                        self.save_timing_memoization()
-
-                    if (run_index in jobs_run) or self.compute_epoch_time_only:
-                        continue
-
-                    _submit(run_index, params)
-                    jobs_run.add(run_index)
-
-                if len(jobs_run) < len(compute_indices):
-                    time.sleep(30)  # Wait for file to update
-
-        except KeyboardInterrupt:
-            print("\nComputing epoch test times interrupted by user.")
-        finally:
-            # Clean up
-            if timing_file.exists():
-                timing_file.unlink()
-
-            if job_id is not None:
-                # Terminate test epoch job
-                subprocess.run(["qdel", job_id])
-
-            # Final summary
-            _summary(computed_completed=len(jobs_run))
+            _wait_for_slot()
+            proc = subprocess.run(
+                ["qsub"],
+                input=script,
+                capture_output=True,
+                text=True,
+                check=True,  # Raise error on non-zero exit code
+            )
+            job_id = proc.stdout.strip()
+            return job_id
+        except subprocess.CalledProcessError as e:
+            _wait_for_slot(must_wait=True)
 
 
-def create_dry_run_timing_file(timing_file: Path, compute_indices: List[int]):
-    """Create a fake timing file for dry run mode"""
+def get_queued_jobs(return_num_running=False) -> int:
+    """Get the current number of queued jobs for the user"""
+    try:
+        result = subprocess.run(
+            ["qstat", "-u", os.environ.get("USER", "")],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        # Count non-header lines
+        lines = result.stdout.strip().split("\n")
+        # Count number of running jobs
+        num_running = sum(1 for line in lines if "R" in line)
+        num_jobs = max(0, len(lines) - 5)  # Skip header lines
+        if return_num_running:
+            return num_jobs, num_running
+        return num_jobs
+    except:
+        return 0, 0
+
+
+def create_dry_run_test_epoch_file(output_file: Path, compute_indices: List[int]):
+    """Create a fake test epoch file for dry run mode"""
     fake_time = -1.0
-    with open(timing_file, "w") as f:
+    with open(output_file, "w") as f:
         for run_index in compute_indices:
             f.write(f"run_index: {run_index}, time_elapsed: {fake_time}\n")
+
+
+def compute_and_submit_job_worker(
+    cfg: SubmissionConfig,
+    worker_id: int,
+    jobs_to_run: List[Tuple[int, RunParams]],
+    test_epoch_lock,
+    test_epoch_dict: dict,
+    success_counter,
+    print_lock,
+):
+    test_epoch_job_id = None
+    jobs_run = set()
+    try:
+        # Then submit the test epoch script for runs needing computation
+        compute_indices = [run_index for run_index, _ in jobs_to_run]
+        test_epoch_file = cfg.test_epoch_dir / f"test_epoch_w{worker_id}.txt"
+        if not cfg.dry_run:
+            test_epoch_job_id = submit_test_epoch_job(
+                cfg, compute_indices, worker_id, test_epoch_file
+            )
+            while not test_epoch_file.exists():
+                time.sleep(30)
+        else:
+            create_dry_run_test_epoch_file(test_epoch_file, compute_indices)
+
+        while len(jobs_run) < len(compute_indices):
+            with open(test_epoch_file, "r") as f:
+                lines = f.readlines()
+
+            for line in lines:
+                if not "run_index" in line or not "time_elapsed" in line:
+                    continue
+
+                parts = line.strip().split(",")
+                run_index = int(parts[0].split(":")[1].strip())
+                time_elapsed = float(parts[1].split(":")[1].strip())
+                # Find corresponding RunParams
+                params = next(p for i, p in jobs_to_run if i == run_index)
+
+                # Save new test epoch results
+                key = get_test_epoch_key(cfg, params)
+                with test_epoch_lock:
+                    test_epoch_dict[key] = time_elapsed
+
+                if not cfg.dry_run:
+                    if save_test_epoch_memoization(
+                        cfg, test_epoch_dict, test_epoch_lock
+                    ):
+                        # Successfully computed and saved test_epoch results
+                        with success_counter.get_lock():
+                            success_counter.value += 1
+
+                if (run_index in jobs_run) or cfg.compute_epoch_time_only:
+                    continue
+
+                submit_pbs_job(cfg, run_index, params, time_elapsed, print_lock)
+                jobs_run.add(run_index)
+
+            if len(jobs_run) < len(compute_indices):
+                time.sleep(30)  # Wait for file to update
+    except KeyboardInterrupt:
+        if test_epoch_job_id is not None:
+            # Terminate test epoch job
+            subprocess.run(["qdel", test_epoch_job_id])
+    finally:
+        if test_epoch_file.exists():
+            test_epoch_file.unlink()
 
 
 # Register the config schema with Hydra as a structured config
@@ -488,14 +405,16 @@ cs.store(name="config", node=SubmissionConfig)
 
 @hydra.main(version_base="1.3", config_path="conf")
 def main(cfg: SubmissionConfig):
-    """Main entry point with Hydra configuration"""
+    """Main entry point."""
 
     if cfg.batch_size is not None:
-        print("Warning: Overriding batch_size will affect timing estimate memoization.")
+        print(
+            "Warning: Overriding batch_size will affect test_epoch estimate memoization."
+        )
     if cfg.safety_margin != BenchmarkConfig.safety_margin:
         print(
             f"Warning: Using non-default safety_margin ({cfg.safety_margin}) "
-            "will affect timing estimate memoization."
+            "will affect test_epoch estimate memoization."
         )
 
     if cfg.verbose:
@@ -512,14 +431,134 @@ def main(cfg: SubmissionConfig):
             print(f"  Epochs override: {cfg.epochs}")
         print()
 
-    # Create and run the submission manager
-    manager = JobSubmissionManager(cfg)
+    # Ensure necessary directories exist
+    cfg.memo_dir.mkdir(parents=True, exist_ok=True)
+    cfg.log_dir.mkdir(parents=True, exist_ok=True)
+    cfg.test_epoch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Parse run parameters from config
+    runs_list = parse_run_params(cfg)
+    total_runs = len(runs_list)
+    print(f"Total runs to submit: {total_runs}")
+    print(f"Repeats per run: {cfg.repeats}")
+
+    if total_runs == 0:
+        print("No runs found with specified filters")
+        return
+
+    # Filter by array_index_subset if specified
+    if cfg.array_index_subset is not None:
+        runs_list = [
+            (i, r) for i, r in enumerate(runs_list) if i in cfg.array_index_subset
+        ]
+    else:
+        runs_list = list(enumerate(runs_list))
+
+    if cfg.num_workers > len(runs_list):
+        print(
+            f"Warning: adjusting num_workers to {cfg.num_workers} due to limited jobs"
+        )
+        cfg.num_workers = len(runs_list)
+
+    # Summary of datasets to process
+    if cfg.verbose:
+        datasets = set(r.dataset_name for _, r in runs_list)
+        print(f"Datasets to process: {', '.join(sorted(datasets))}")
+
+    # Load existing test epoch memoization
+    test_epoch_dict = load_test_epoch_memoization(cfg)
+
+    # Find all cached runs and runs needing computation
+    cached_runs, runs_to_compute = [], []
+    for run_index, params in runs_list:
+        key = get_test_epoch_key(cfg, params)
+        if key in test_epoch_dict:
+            cached_runs.append((run_index, params))
+        else:
+            runs_to_compute.append((run_index, params))
+
+    print(
+        f"Test epoch status: {len(cached_runs)} cached, {len(runs_to_compute)} to compute"
+    )
+
+    def _submit_cached_runs():
+        """Submit all cached runs"""
+        for run_index, params in cached_runs:
+            key = get_test_epoch_key(cfg, params)
+            epoch_time = test_epoch_dict[key]
+            submit_pbs_job(cfg, run_index, params, epoch_time)
+
+    def _summary(computed_completed=len(runs_to_compute)):
+        """Print final submission summary"""
+        print("\n=== SUBMISSION SUMMARY ===")
+        print(f"Total runs: {len(cached_runs) + computed_completed}")
+        print(f"Test epoch results from cached: {len(cached_runs)}")
+        print(f"Test epoch results computed: {computed_completed}")
+
+    # If no runs need computation, just submit cached runs and exit
+    if len(runs_to_compute) == 0:
+        _submit_cached_runs()
+        _summary()
+        return
+
+    # Otherwise, launch workers to compute test epochs in parallel,
+    # before submitting the cached runs
+    from multiprocessing import Process, Lock, Value, Manager
+
+    multiprocessing.set_start_method("spawn", force=True)
+
+    # Create shared manager for test epoch results and success counter
+    test_epoch_manager = Manager()
+    test_epoch_lock = test_epoch_manager.Lock()
+    test_epoch_dict = test_epoch_manager.dict(test_epoch_dict)
+    success_counter = Value("i", 0)
+    print_lock = Lock()
+
+    processes = []
+    partition_size = (len(runs_to_compute) + 1) // cfg.num_workers
+    for worker_id in range(cfg.num_workers):
+        partition_low = worker_id * partition_size
+        partition_high = min((partition_low + partition_size), len(runs_to_compute))
+        jobs_to_run = runs_to_compute[partition_low:partition_high]
+        if cfg.verbose:
+            print(
+                f"  Worker {worker_id} running {len(jobs_to_run)} jobs: {[i for i, _ in jobs_to_run]}"
+            )
+        p = Process(
+            target=compute_and_submit_job_worker,
+            args=(
+                cfg,
+                worker_id,
+                jobs_to_run,
+                test_epoch_lock,
+                test_epoch_dict,
+                success_counter,
+                print_lock,
+            ),
+        )
+        p.start()
+        processes.append(p)
+
+    # Check that all workers have started their test epoch jobs before queuing cached runs
+    _, num_running = get_queued_jobs(return_num_running=True)
+    while num_running < cfg.num_workers:
+        time.sleep(1)
+        _, num_running = get_queued_jobs(return_num_running=True)
+    if cfg.verbose:
+        print("All workers have queued, submitting cached runs...")
+    _submit_cached_runs()
 
     try:
-        manager.run()
+        for p in processes:
+            p.join()
     except KeyboardInterrupt:
-        print("\nInterrupted by user")
-        sys.exit(0)
+        print("\nComputation interrupted by user, terminating workers...")
+        for p in processes:
+            p.terminate()
+        for p in processes:
+            p.join()
+
+    _summary(computed_completed=success_counter.value)
 
 
 if __name__ == "__main__":
