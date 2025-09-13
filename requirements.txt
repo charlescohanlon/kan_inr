@@ -5,3 +5,5 @@ omegaconf
 torchmetrics
 matplotlib
 pandas
+ipykernel
+nvitop
