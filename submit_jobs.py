@@ -335,9 +335,9 @@ def get_queued_jobs(return_num_running=False) -> int:
         # Count non-header lines
         lines = result.stdout.strip().split("\n")
         # Count number of running jobs
-        num_running = sum(1 for l in lines if _is_running_job_line(l))
         num_jobs = sum(1 for l in lines if _is_job_line(l))
         if return_num_running:
+            num_running = sum(1 for l in lines if _is_running_job_line(l))
             return num_jobs, num_running
         return num_jobs
     except:
@@ -625,6 +625,12 @@ def retry_failed_jobs(
     for er_file in log_dir.glob("*.ER"):
         if er_file.stat().st_size == 0:
             continue
+
+        # Check if the error is due to out of memory error
+        with open(er_file, "r") as f:
+            er_contents = f.read()
+            oom_error = "memory" in er_contents.lower()
+
         ou_file = er_file.with_suffix(".OU")
 
         # Find the run index from the .OU file
@@ -649,6 +655,10 @@ def retry_failed_jobs(
         for run_index, params in retry_runs:
             key = get_test_epoch_key(cfg, params)
             epoch_time = test_epoch_dict[key]
+            if oom_error:
+                # NOTE: not re-calculating epoch time, we're hoping smaller
+                # batch size doesn't result in exceeding job walltime
+                params.safety_margin -= 0.1
             submit_pbs_job(cfg, run_index, params, epoch_time, log_dir)
 
 
@@ -854,7 +864,7 @@ def main(cfg: SubmissionConfig):
             time.sleep(1)
             _, num_running = get_queued_jobs(return_num_running=True)
         if len(cached_runs) > 0 and cfg.verbose:
-            print("All workers have queued, submitting cached runs...")
+            print("All workers are running, submitting cached runs...")
         _submit_cached_runs()
 
     # Wait for all workers to complete
