@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from genericpath import exists
 import multiprocessing
 import os
 import subprocess
@@ -7,6 +8,7 @@ import pickle
 from pathlib import Path
 from typing import List, Optional, Tuple
 from dataclasses import dataclass, fields
+import pandas as pd
 
 import hydra
 from hydra.core.config_store import ConfigStore
@@ -19,7 +21,7 @@ class SubmissionConfig(BenchmarkConfig):
     """Extended configuration that includes submission-specific parameters"""
 
     # Submission-specific parameters
-    max_jobs: int = 20
+    max_jobs: int = 18
     wait_time: int = 10 * 60
     dry_run: bool = False
     verbose: bool = False
@@ -27,14 +29,24 @@ class SubmissionConfig(BenchmarkConfig):
     num_minutes_per_job: float = 3  # Expected minutes per job for test epoch
     compute_epoch_time_only: bool = False
     num_workers: int = 4  # Number of parallel workers test_epoch test epochs
-    time_scaler: float = 0.9  # Scaling factor for estimated time
+    time_scaler: float = 1  # Scaling factor for estimating time
 
     # Directories for logs and memoization
     log_dir: Path = Path(BenchmarkConfig.home_dir) / "kan_inr" / "logs"
     memo_dir: Path = Path(BenchmarkConfig.home_dir) / "memo"
     test_epoch_dir: Path = log_dir / "test_epochs"
-
     test_epoch_memo_file: Path = memo_dir / "test_epoch_memo.pkl"
+
+    # Directory for operations with aggregated results
+    aggregated_results_dir: Path = Path(BenchmarkConfig.home_dir) / "aggregated_results"
+    aggregate_file: Optional[Path] = (
+        None  # If None, will be auto-named the same as params file
+    )
+    filter_from_aggregated: bool = True  # Filter jobs already in aggregate file
+    aggregate_results: bool = True  # Aggregate results after submission
+
+    # Retry any failed jobs found in log directory
+    retry_failed: bool = True
 
 
 def get_test_epoch_key(cfg: SubmissionConfig, params: RunParams) -> str:
@@ -90,6 +102,7 @@ def get_override_args(cfg: SubmissionConfig) -> List[str]:
     for key in submission_fields:
         if key in benchmark_fields and cfg[key] is not None:
             override_args.append(f'{key}={str(cfg[key]).replace(" ", "")}')
+    return override_args
 
 
 def submit_test_epoch_job(
@@ -97,12 +110,12 @@ def submit_test_epoch_job(
 ) -> str:
     """Create a bash script for testing single epochs"""
     # Estimate walltime for test epoch runs
-    time_in_minutes = len(run_indices) * cfg.num_minutes_per_job
+    time_in_minutes = max(len(run_indices) * cfg.num_minutes_per_job, 5)
     walltime = f"{int(time_in_minutes // 60):02d}:{int(time_in_minutes % 60):02d}:00"
     job_name = f"te_w{worker_id}"
 
     override_args = get_override_args(cfg)
-    override_args.append("test_epoch_run=True")
+    override_args.append("test_epoch_run=True")  # Ensure test epoch mode
     override_str = " ".join(override_args).replace("'", '"')
 
     script = f"""#!/bin/bash
@@ -129,15 +142,19 @@ for run_index in {' '.join(map(str, run_indices))}; do
     echo "run_index: $run_index, time_elapsed: $ELAPSED" >> {output_file}
 done
 """
-    # Submit script to PBS
-    result = subprocess.run(
-        ["qsub"],
-        input=script,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    job_id = result.stdout.strip()
+    try:
+        # Submit script to PBS
+        result = subprocess.run(
+            ["qsub"],
+            input=script,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        job_id = result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        print(f"Error submitting test epoch job: {e.stderr}")
+        raise e
 
     return job_id
 
@@ -150,7 +167,7 @@ def get_pbs_walltime_and_gpus(
     """
     # Calculate total estimated time
     # NOTE: epoch_time includes other overhead which pads the estimate
-    # +1 for reconstruction overhead
+    # +1 for reconstruction phase in real runs
     total_time = (params.epochs + 1) * cfg.repeats * epoch_time * cfg.time_scaler
 
     # Adjust for extra GPUs based on time thresholds
@@ -201,7 +218,9 @@ def submit_pbs_job(
     run_index: int,
     params: RunParams,
     epoch_time: float,
+    output_dir: Path,
     print_lock=None,
+    worker_id: int = 0,
 ) -> str:
     walltime, num_gpus = get_pbs_walltime_and_gpus(cfg, params, epoch_time)
     job_name = f"{params.network_type[:1]}_{params.dataset_name[:3]}_{run_index}"
@@ -222,23 +241,6 @@ def submit_pbs_job(
     # Get override args for submission script
     override_args = get_override_args(cfg)
     override_str = " ".join(override_args).replace("'", '"')
-
-    params_file = (
-        cfg.params_file[: -len(".json")]
-        if cfg.params_file.endswith(".json")
-        else cfg.params_file
-    )
-    output_dir = cfg.log_dir / params_file
-    if not output_dir.exists():
-        output_dir /= "run_0"
-        output_dir.mkdir(parents=True)
-    else:
-        # Find next available run id
-        run_id = 1
-        while (output_dir / f"run_{run_id}").exists():
-            run_id += 1
-        output_dir /= f"run_{run_id}"
-        output_dir.mkdir()
 
     script = f"""#!/bin/bash
 # ---------- PBS DIRECTIVES ----------
@@ -267,6 +269,7 @@ echo "  Host: $(hostname)"
 echo "  Job ID: $PBS_JOBID"
 echo "  Job Array Index: $PBS_ARRAY_INDEX"
 echo "  Number of GPUs detected: $NUM_GPUS"
+echo "  Epoch time: {epoch_time:.2f} seconds"
 echo "  Walltime: {walltime}"
 echo "  System: sophia"
 echo "  Override args: {override_str}"
@@ -287,6 +290,10 @@ echo "Completed at: $(date)"
             if current_jobs < cfg.max_jobs and not must_wait:
                 return
 
+            if cfg.verbose and worker_id == 0:
+                print(
+                    f"\nQueue full ({current_jobs} jobs), waiting {cfg.wait_time // 60} minutes..."
+                )
             time.sleep(cfg.wait_time)
             must_wait = False  # Only force wait once
 
@@ -309,6 +316,13 @@ echo "Completed at: $(date)"
 
 def get_queued_jobs(return_num_running=False) -> int:
     """Get the current number of queued jobs for the user"""
+
+    def _is_job_line(line: str) -> bool:
+        return line and line[0].isdigit()
+
+    def _is_running_job_line(line: str) -> bool:
+        return _is_job_line(line) and " R " in line
+
     try:
         result = subprocess.run(
             ["qstat", "-u", os.environ.get("USER", "")],
@@ -319,8 +333,8 @@ def get_queued_jobs(return_num_running=False) -> int:
         # Count non-header lines
         lines = result.stdout.strip().split("\n")
         # Count number of running jobs
-        num_running = sum(1 for line in lines if "R" in line)
-        num_jobs = max(0, len(lines) - 5)  # Skip header lines
+        num_running = sum(1 for l in lines if _is_running_job_line(l))
+        num_jobs = sum(1 for l in lines if _is_job_line(l))
         if return_num_running:
             return num_jobs, num_running
         return num_jobs
@@ -344,6 +358,7 @@ def compute_and_submit_job_worker(
     test_epoch_dict: dict,
     success_counter,
     print_lock,
+    output_dir: Path,
 ):
     test_epoch_job_id = None
     jobs_run = set()
@@ -390,7 +405,15 @@ def compute_and_submit_job_worker(
                 if (run_index in jobs_run) or cfg.compute_epoch_time_only:
                     continue
 
-                submit_pbs_job(cfg, run_index, params, time_elapsed, print_lock)
+                submit_pbs_job(
+                    cfg,
+                    run_index,
+                    params,
+                    time_elapsed,
+                    output_dir,
+                    print_lock,
+                    worker_id,
+                )
                 jobs_run.add(run_index)
 
             if len(jobs_run) < len(compute_indices):
@@ -402,6 +425,131 @@ def compute_and_submit_job_worker(
     finally:
         if test_epoch_file.exists():
             test_epoch_file.unlink()
+
+
+def create_run_signature(cfg: BenchmarkConfig, params: RunParams) -> str:
+    """
+    Create a signature string that uniquely identifies a run based on
+    the parameters that are saved to the CSV results file.
+    """
+    # Handle KAN parameters
+    if params.kan_params:
+        kan_sig = f"{params.kan_params.grid_radius}_{params.kan_params.num_grids}"
+    else:
+        kan_sig = "None_None"
+
+    # Create signature from key identifying parameters
+    signature = (
+        f"{params.dataset_name}_{params.network_type}_{params.epochs}_"
+        f"{params.n_neurons}_{params.n_hidden_layers}_{params.n_levels}_"
+        f"{params.n_features_per_level}_{params.per_level_scale}_"
+        f"{params.log2_hashmap_size}_{params.base_resolution}_"
+        f"{cfg.repeats}_{kan_sig}_{cfg.safety_margin}_"
+        f"{getattr(cfg, 'ssd_dir', None) is not None}"
+    )
+    return signature
+
+
+def create_csv_row_signature(row: pd.Series, cfg: BenchmarkConfig) -> str:
+    """
+    Create a signature string from a CSV row that matches create_run_signature.
+    """
+
+    # Handle None/NaN values
+    def safe_str(val):
+        if pd.isna(val):
+            return "None"
+        return str(val)
+
+    # NOTE: not using any kind of step parameters
+    kan_sig = f"{safe_str(row.get('kan_grid_radius', 'None'))}_{safe_str(row.get('kan_num_grids', 'None'))}"
+
+    signature = (
+        f"{safe_str(row.get('dataset_name'))}_{safe_str(row.get('network_type'))}_{safe_str(row.get('epoch_count'))}_"
+        f"{safe_str(row.get('num_neurons'))}_{safe_str(row.get('num_hidden_layers'))}_{safe_str(row.get('num_levels'))}_"
+        f"{safe_str(row.get('num_features_per_level'))}_{safe_str(row.get('per_level_scale'))}_"
+        f"{safe_str(row.get('log2_hashmap_size'))}_{safe_str(row.get('base_resolution'))}_"
+        f"{safe_str(row.get('num_repeats'))}_{kan_sig}_{cfg.safety_margin}_"
+        f"{getattr(cfg, 'ssd_dir', None) is not None}"
+    )
+    return signature
+
+
+def filter_from_aggregate(
+    cfg: SubmissionConfig, aggregate_file: Path, runs: List[Tuple[int, RunParams]]
+):
+    """
+    Filter runs that have already been completed by comparing against aggregate results.
+
+    Uses an efficient signature-based approach:
+    1. Precompute signatures for all rows in aggregate_df (O(n))
+    2. Create signatures for input runs and check against the set (O(1) per run)
+
+    Args:
+        cfg: Submission configuration
+        aggregate_file: Path to aggregate results CSV
+        runs: List of (index, RunParams) tuples to filter
+
+    Returns:
+        List of runs not found in the aggregate file
+    """
+    aggregate_df = pd.read_csv(aggregate_file)
+
+    # Precompute signatures for all existing results (O(n))
+    existing_signatures = set()
+    for _, row in aggregate_df.iterrows():
+        signature = create_csv_row_signature(row, cfg)
+        existing_signatures.add(signature)
+
+    def _run_not_in_aggregate(run: Tuple[int, RunParams]) -> bool:
+        """Check if a run is not in the aggregate results (O(1) lookup)."""
+        _, params = run
+        run_signature = create_run_signature(cfg, params)
+        return run_signature not in existing_signatures
+
+    return [r for r in runs if _run_not_in_aggregate(r)]
+
+
+def aggregate_results(cfg: SubmissionConfig, aggregate_file: Path):
+    # Wait for all jobs to complete before aggregating
+    csv_dir = Path(cfg.output_dir)
+    csv_files = list(csv_dir.glob("*.csv"))
+    if not csv_files:
+        print(f"No result CSV files found to aggregate in {csv_dir}")
+        return
+
+    # Load and concatenate all CSV files
+    df_list = []
+    for csv_file in csv_files:
+        df = pd.read_csv(csv_file)
+        if df.empty:
+            continue
+        df_list.append(df)
+
+    # Include existing aggregate file if it exists
+    if aggregate_file.exists():
+        existing_df = pd.read_csv(aggregate_file)
+        df_list.insert(0, existing_df)
+
+    if not df_list:
+        print("No valid data found in CSV files.")
+        return
+
+    aggregated_df = pd.concat(df_list, ignore_index=True)
+
+    # Save the aggregated results
+    aggregated_df.to_csv(aggregate_file, index=False)
+    if cfg.verbose:
+        print(f"Aggregated results saved to {aggregate_file}")
+
+    # Clean up original CSV files
+    if cfg.verbose:
+        print("Cleaning up individual CSV files...")
+    for csv_file in csv_files:
+        try:
+            csv_file.unlink()
+        except Exception as e:
+            print(f"Warning: Could not delete {csv_file}: {e}")
 
 
 # Register the config schema with Hydra as a structured config
@@ -447,8 +595,6 @@ def main(cfg: SubmissionConfig):
     # Parse run parameters from config
     runs_list = parse_run_params(cfg)
     total_runs = len(runs_list)
-    print(f"Total runs to submit: {total_runs}")
-    print(f"Repeats per run: {cfg.repeats}")
 
     if total_runs == 0:
         print("No runs found with specified filters")
@@ -462,11 +608,55 @@ def main(cfg: SubmissionConfig):
     else:
         runs_list = list(enumerate(runs_list))
 
-    if cfg.num_workers > len(runs_list):
-        print(
-            f"Warning: adjusting num_workers to {cfg.num_workers} due to limited jobs"
-        )
-        cfg.num_workers = len(runs_list)
+    run_params_name = (
+        cfg.params_file[: -len(".json")]
+        if cfg.params_file.endswith(".json")
+        else cfg.params_file
+    )
+    cfg.aggregated_results_dir.mkdir(parents=True, exist_ok=True)
+
+    # Path to aggregated results file
+    if cfg.aggregate_file is not None:
+        aggregate_file = cfg.aggregated_results_dir / cfg.aggregate_file
+        if not aggregate_file.exists():
+            raise FileNotFoundError(
+                f"Specified aggregate_file {aggregate_file} does not exist"
+            )
+    else:
+        aggregate_file = cfg.aggregated_results_dir / (run_params_name + ".csv")
+
+    # Create unique output directory for this submission
+    # (named after the params file)
+    run_log_dir = cfg.log_dir / run_params_name
+    if not run_log_dir.exists():
+        run_log_dir /= "run_0"
+        run_log_dir.mkdir(parents=True)
+    else:
+        # Find next available run id
+        run_id = 1
+
+        # Find first non-existing or empty run directory
+        d = run_log_dir / f"run_{run_id}"
+        while d.exists() and any(d.iterdir()):
+            run_id += 1
+            d = run_log_dir / f"run_{run_id}"
+
+        run_log_dir /= f"run_{run_id}"
+        run_log_dir.mkdir(exist_ok=True)
+
+    # Filter by jobs stored in aggregate results file
+    if cfg.filter_from_aggregated and aggregate_file.exists():
+        if cfg.verbose:
+            before_len = len(runs_list)
+        runs_list = filter_from_aggregate(cfg, aggregate_file, runs_list)
+        if cfg.verbose:
+            after_len = len(runs_list)
+            filtered_out = before_len - after_len
+            print(f"Filtered out {filtered_out} jobs already in aggregate file")
+            print(f"  Remaining jobs to submit: {after_len}")
+
+    print(f"Total runs to submit: {len(runs_list)}")
+    print(f"Repeats per run: {cfg.repeats}")
 
     # Summary of datasets to process
     if cfg.verbose:
@@ -494,10 +684,12 @@ def main(cfg: SubmissionConfig):
         for run_index, params in cached_runs:
             key = get_test_epoch_key(cfg, params)
             epoch_time = test_epoch_dict[key]
-            submit_pbs_job(cfg, run_index, params, epoch_time)
+            submit_pbs_job(cfg, run_index, params, epoch_time, run_log_dir)
 
     def _summary(computed_completed=len(runs_to_compute)):
         """Print final submission summary"""
+        if cfg.dry_run:
+            computed_completed = len(runs_to_compute)
         print("\n=== SUBMISSION SUMMARY ===")
         print(f"Total runs: {len(cached_runs) + computed_completed}")
         print(f"Test epoch results from cached: {len(cached_runs)}")
@@ -505,6 +697,8 @@ def main(cfg: SubmissionConfig):
 
     # If no runs need computation, just submit cached runs and exit
     if len(runs_to_compute) == 0:
+        if cfg.verbose:
+            print("All test epochs cached, submitting cached runs only.")
         _submit_cached_runs()
         _summary()
         return
@@ -521,10 +715,12 @@ def main(cfg: SubmissionConfig):
     test_epoch_dict = test_epoch_manager.dict(test_epoch_dict)
     success_counter = Value("i", 0)
     print_lock = Lock()
-
+    num_workers = min(cfg.num_workers, len(runs_to_compute))
     processes = []
-    partition_size = (len(runs_to_compute) + 1) // cfg.num_workers
-    for worker_id in range(cfg.num_workers):
+
+    # Partition the work among available workers
+    partition_size = (len(runs_to_compute) + 1) // num_workers
+    for worker_id in range(num_workers):
         partition_low = worker_id * partition_size
         partition_high = min((partition_low + partition_size), len(runs_to_compute))
         jobs_to_run = runs_to_compute[partition_low:partition_high]
@@ -542,21 +738,26 @@ def main(cfg: SubmissionConfig):
                 test_epoch_dict,
                 success_counter,
                 print_lock,
+                run_log_dir,
             ),
         )
         p.start()
         processes.append(p)
 
     # Check that all workers have started their test epoch jobs before queuing cached runs
-    _, num_running = get_queued_jobs(return_num_running=True)
-    while num_running < cfg.num_workers:
-        time.sleep(1)
+    if not cfg.dry_run:
         _, num_running = get_queued_jobs(return_num_running=True)
-    if cfg.verbose:
-        print("All workers have queued, submitting cached runs...")
-    _submit_cached_runs()
+        while num_running < num_workers:
+            time.sleep(1)
+            _, num_running = get_queued_jobs(return_num_running=True)
+        if len(cached_runs) > 0 and cfg.verbose:
+            print("All workers have queued, submitting cached runs...")
+        _submit_cached_runs()
 
+    # Wait for all workers to complete
     try:
+        if cfg.verbose:
+            print("\nWaiting for all workers to complete...")
         for p in processes:
             p.join()
     except KeyboardInterrupt:
@@ -565,8 +766,67 @@ def main(cfg: SubmissionConfig):
             p.terminate()
         for p in processes:
             p.join()
+        _summary(computed_completed=success_counter.value)
+        test_epoch_manager.shutdown()
+        return
+    finally:
+        # Clear out the test_epochs directory
+        for f in cfg.test_epoch_dir.glob("test_epoch_w*.txt"):
+            f.unlink()
 
+    # Final summary
     _summary(computed_completed=success_counter.value)
+
+    # Wait for all jobs to complete
+    if not cfg.dry_run:
+        print("Waiting for all jobs to complete.")
+        while True:
+            current_jobs = get_queued_jobs()
+            if current_jobs == 0:
+                break
+            if cfg.verbose:
+                print(f"  {current_jobs} jobs still in queue, waiting...")
+            time.sleep(5 * 60)
+        print("All jobs completed.")
+
+    # Retry any failed jobs found in the log directory
+    if cfg.retry_failed:
+        failed_runs = []
+        for er_file in run_log_dir.glob("*.ER"):
+            if er_file.stat().st_size == 0:
+                continue
+            ou_file = er_file.with_suffix(".OU")
+
+            # Find the run index from the .OU file
+            if not ou_file.exists():
+                print(f"Warning: .OU file not found for {er_file}, skipping")
+                continue
+
+            # Look for "  Job Array Index: <index>" line
+            with open(ou_file, "r") as f:
+                for line in f:
+                    if not "Job Array Index" in line:
+                        continue
+                    parts = line.strip().split(":")
+                    run_index = int(parts[-1].strip())
+                    failed_runs.append(run_index)
+                    er_file.unlink()  # Remove .ER file
+                    ou_file.unlink()  # Remove .OU file
+                    break
+        if len(failed_runs) > 0:
+            print(f"Retrying {len(failed_runs)} failed runs: {failed_runs}")
+            retry_runs = [(i, p) for i, p in runs_list if i in set(failed_runs)]
+            for run_index, params in retry_runs:
+                key = get_test_epoch_key(cfg, params)
+                epoch_time = test_epoch_dict[key]
+                submit_pbs_job(cfg, run_index, params, epoch_time, run_log_dir)
+
+    # Finally, aggregate results into a single CSV file (the aggregate file)
+    if cfg.aggregate_results and not cfg.dry_run:
+        aggregate_results(cfg, aggregate_file)
+
+    # Shutdown the multiprocessing manager at the very end
+    test_epoch_manager.shutdown()
 
 
 if __name__ == "__main__":
