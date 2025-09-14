@@ -65,6 +65,7 @@ class BenchmarkConfig:
         epochs: Override epochs for all runs (uses params_file value if None)
         ssd_dir: Optional SSD directory for faster I/O during training
         test_epoch_run: If True, only run one epoch to estimate time (for job scheduling)
+        output_dir: Directory to save result CSV
     """
 
     params_file: str = "params"
@@ -83,6 +84,7 @@ class BenchmarkConfig:
     epochs: Optional[int] = None
     ssd_dir: Optional[str] = None
     test_epoch_run: bool = False
+    output_dir: str = str(Path(home_dir) / "results")
 
 
 @dataclass
@@ -208,7 +210,6 @@ class RunParams:
 
 def run_benchmark(
     data_path: Path,
-    output_path: Path,
     params: RunParams,
     cfg: BenchmarkConfig,
     should_save: bool = False,
@@ -224,7 +225,6 @@ def run_benchmark(
 
     Args:
         data_path: Path to the raw volumetric data file
-        output_path: Path to save CSV results
         params: Configuration parameters for this run
         cfg: Global benchmark configuration
         should_save: Whether to save the trained model and reconstruction
@@ -261,8 +261,7 @@ def run_benchmark(
     native_encoder = device.type == "cpu"
     native_network = device.type == "cpu" or params.network_type.lower() != "mlp"
 
-    # Initialize accumulators for metrics across multiple runs
-    cum_psnr, cum_ssim, cum_mse = 0.0, 0.0, 0.0
+    psnrs, ssims, mses = [], [], []
     num_repeats = cfg.repeats
 
     # Run multiple training sessions and average the results
@@ -305,21 +304,26 @@ def run_benchmark(
         if cfg.batch_size is None:
             # Compute batch size based on dataset and model
             # Use the underlying model for batch size calculation
-            batch_size = calculate_batch_size(
-                model,
-                device,
-                data_shape,
-                is_training=True,
-                optimizer=optimizer,
-                sampler=sampler,
-                safety_margin=cfg.safety_margin,
-            )
             if is_main_process:
-                print(
-                    f"Calculated batch size: {batch_size:,} per GPU with "
-                    f"safety margin {cfg.safety_margin} for training"
+                batch_size = calculate_batch_size(
+                    model,
+                    device,
+                    data_shape,
+                    is_training=True,
+                    optimizer=optimizer,
+                    sampler=sampler,
+                    safety_margin=cfg.safety_margin,
                 )
+            else:
+                # Initialize batch_size for non-main processes before broadcast
+                batch_size = 0
+            # Broadcast batch size to all ranks
+            if is_ddp:
+                batch_size = torch.tensor(batch_size, device=device)
+                dist.broadcast(batch_size, src=0)
+                batch_size = batch_size.item()
         else:
+            # Doesn't need to be broadcast if fixed
             batch_size = cfg.batch_size
 
         # Wrap model with DDP if in distributed mode
@@ -328,6 +332,9 @@ def run_benchmark(
 
         if is_main_process:
             print("Training INR...")
+
+        if is_ddp:
+            dist.barrier()  # Ensure all ranks start training together
 
         # Training loop
         durations = []
@@ -344,7 +351,11 @@ def run_benchmark(
             )
 
             if cfg.test_epoch_run:
-                return  # Exit early if just testing epoch time
+                return  # Just testing epoch time
+
+            if is_ddp:
+                torch.cuda.synchronize()  # Ensure CUDA ops complete
+                dist.barrier()  # Ensure all ranks finish epoch
 
             durations.append(duration)
             if is_main_process:
@@ -357,7 +368,6 @@ def run_benchmark(
             scheduler.step()  # Step the learning rate scheduler
 
         # Reconstruct and compute metrics when finished training
-        # Only done on main process to avoid redundant computation
         if is_main_process:
             print("Reconstructing INR volume...")
             reconst_data = reconstruct(
@@ -377,10 +387,9 @@ def run_benchmark(
                 enable_pbar=cfg.enable_pbar,
             )
 
-            # Accumulate metrics for averaging
-            cum_psnr += psnr
-            cum_ssim += ssim
-            cum_mse += mse
+            psnrs.append(psnr)
+            ssims.append(ssim)
+            mses.append(mse)
 
             print(
                 f"Repeat {repeat + 1}/{num_repeats}: PSNR = {psnr}, SSIM = {ssim}, MSE = {mse}"
@@ -401,14 +410,20 @@ def run_benchmark(
     # Only compute and save results on main process
     if is_main_process:
         # Calculate average metrics across all repeats
-        avg_psnr = cum_psnr / num_repeats
-        avg_ssim = cum_ssim / num_repeats
-        avg_mse = cum_mse / num_repeats
-        print(
-            f"Final: Avg PSNR = {avg_psnr}, "
-            f"Avg SSIM = {avg_ssim}, "
-            f"Avg MSE = {avg_mse}"
-        )
+        avg_psnr = sum(psnrs) / num_repeats
+        std_dev_psnr = np.std(psnrs)
+        avg_ssim = sum(ssims) / num_repeats
+        std_dev_ssim = np.std(ssims)
+        avg_mse = sum(mses) / num_repeats
+        std_dev_mse = np.std(mses)
+
+        print("Final Results")
+        print("  Avg PSNR:", avg_psnr)
+        print("  Std Dev PSNR:", std_dev_psnr)
+        print("  Avg SSIM:", avg_ssim)
+        print("  Std Dev SSIM:", std_dev_ssim)
+        print("  Avg MSE:", avg_mse)
+        print("  Std Dev MSE:", std_dev_mse)
 
         # Compute compression ratio
         with TemporaryDirectory() as tmpdir:
@@ -442,11 +457,22 @@ def run_benchmark(
 
         pbs_job_id = os.getenv("PBS_JOBID")
         pbs_array_index = os.getenv("PBS_ARRAY_INDEX", 0)
-        run_param_hash = params.epoch_time_hash(
+        epoch_time_hash = params.epoch_time_hash(
             safety_margin=cfg.safety_margin,
             dataset_name=params.dataset_name,
             ssd_dir_provided=cfg.ssd_dir is not None,
         )
+
+        # Set up output directory and file
+        Path(cfg.output_dir).mkdir(parents=True, exist_ok=True)
+        if cfg.output_filename is None:
+            # Create a unique filename
+            uid = uuid4().hex
+            unique_filename = uid + "_results.csv"
+            output_path = Path(cfg.output_dir) / unique_filename
+            print(f"No output filename specified, using {unique_filename}")
+        else:
+            output_path = Path(cfg.output_dir) / cfg.output_filename
 
         # Write results to CSV
         with open(output_path, "a") as f:
@@ -477,10 +503,13 @@ def run_benchmark(
                         "batch_size",
                         "pbs_job_id",
                         "pbs_array_index",
-                        "run_param_hash",
+                        "epoch_time_hash",
                         "avg_psnr",
+                        "std_dev_psnr",
                         "avg_ssim",
+                        "std_dev_ssim",
                         "avg_mse",
+                        "std_dev_mse",
                     ]
                 )
                 + "\n"
@@ -512,10 +541,13 @@ def run_benchmark(
                             batch_size,
                             pbs_job_id,
                             pbs_array_index,
-                            run_param_hash,
+                            epoch_time_hash,
                             avg_psnr,
+                            std_dev_psnr,
                             avg_ssim,
+                            std_dev_ssim,
                             avg_mse,
+                            std_dev_mse,
                         ],
                     )
                 )
@@ -1409,9 +1441,6 @@ def main(cfg: BenchmarkConfig):
     Args:
         cfg: Hydra-managed configuration object
     """
-    # Parse all possible run configurations from the params file
-    runs_list = parse_run_params(cfg)
-
     # Check if we should use DDP (multi-GPU training)
     use_ddp = (
         torch.cuda.is_available()
@@ -1419,20 +1448,27 @@ def main(cfg: BenchmarkConfig):
         and "RANK" in os.environ
     )
 
+    if use_ddp and cfg.test_epoch_run:
+        raise ValueError("Cannot use DDP with test_epoch_run=True")
+
     if use_ddp:
         rank, world_size, local_rank = setup_ddp()
     else:
         rank, world_size, local_rank = 0, 1, 0
 
+    is_main_process = rank == 0
+
     # Only print configuration on main process to avoid duplicate output
-    if rank == 0:
+    if is_main_process:
         print("Benchmark Configuration:\n" + OmegaConf.to_yaml(cfg))
         if use_ddp:
             print(f"Using DDP with {world_size} GPUs")
 
+    # Parse all possible run configurations from the params file
+    runs_list = parse_run_params(cfg)
     # Select the run parameters based on the job array index (for HPC job arrays)
     job_array_idx = int(os.environ.get("PBS_ARRAY_INDEX", 0))
-    if rank == 0:
+    if is_main_process:
         print(f"Running job array index: {job_array_idx}")
     params = runs_list[job_array_idx]
 
@@ -1444,6 +1480,7 @@ def main(cfg: BenchmarkConfig):
     home_dir = Path(cfg.home_dir)
     data_dir = home_dir / cfg.data_path
     data_path = None
+
     if not data_dir.exists():
         raise FileNotFoundError(f"Data path {data_dir} does not exist.")
 
@@ -1458,22 +1495,10 @@ def main(cfg: BenchmarkConfig):
         )
 
     # If a ssd_dir is specified, copy data to the SSD for faster I/O
-    if rank == 0 and cfg.ssd_dir is not None:
+    if is_main_process and cfg.ssd_dir is not None:
         ssd_data_path = Path(cfg.ssd_dir) / data_path.name
         shutil.copy(data_path, ssd_data_path)
         data_path = ssd_data_path
-
-    # Set up output directory and file
-    output_dir = home_dir / "results"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.output_filename is None:
-        # Create a unique filename
-        uid = uuid4().hex
-        unique_filename = uid + "_results.csv"
-        output_path = output_dir / unique_filename
-        print(f"No output filename specified, using {unique_filename}")
-    else:
-        output_path = output_dir / cfg.output_filename
 
     # Check if we should save the model based on the save_mode
     should_save = False
@@ -1501,7 +1526,7 @@ def main(cfg: BenchmarkConfig):
 
         should_save = params.log2_hashmap_size == specific_hashmap_size
 
-    if rank == 0:
+    if is_main_process:
         start_time = time()
         print(f"Running w/ parameters:")
         pprint(params)
@@ -1511,7 +1536,6 @@ def main(cfg: BenchmarkConfig):
         # Run the actual benchmark
         run_benchmark(
             data_path,
-            output_path,
             params,
             cfg,
             should_save,
@@ -1523,7 +1547,7 @@ def main(cfg: BenchmarkConfig):
         # Ensure cleanup happens even if errors occur
         cleanup_ddp()
         end_time = time()
-        if rank == 0:
+        if is_main_process:
             print(f"Total time: {(end_time - start_time) / 60:.2f} minutes")
 
 
