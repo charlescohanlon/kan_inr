@@ -69,7 +69,15 @@ class BenchmarkConfig:
     """
 
     params_file: str = "params"
-    network_types: List[str] = field(default_factory=lambda: ["fkan", "mlp"])
+    network_types: List[str] = field(
+        default_factory=lambda: [
+            "fastkan",
+            "mlp",
+            "fourierkan",
+            "siren",
+            "efficientkan",
+        ]
+    )
     home_dir: str = "/grand/insitu/cohanlon"
     data_path: str = "datasets/raw"
     params_path: str = "kan_inr/params"
@@ -114,7 +122,7 @@ class RunParams:
 
     Attributes:
         dataset_name: Name of the dataset (e.g., "richtmyer_meshkov")
-        network_type: Type of network architecture ("mlp" or "kan")
+        network_type: Type of network architecture ("mlp" or "efficientkan")
         lrate: Initial learning rate
         lrate_decay: Number of epochs between learning rate decay steps
         epochs: Total number of training epochs
@@ -130,6 +138,7 @@ class RunParams:
         zfp_mlp: ZFP compression parameter for MLP (unused in current implementation)
         kan_params: Optional dictionary of KAN-specific parameters
         special_mode: Special mode for additional configurations e.g., SIREN, etc.
+        output_activation: Activation function for the output layer ("None", "Sigmoid", "ReLU")
     """
 
     dataset_name: str
@@ -151,7 +160,6 @@ class RunParams:
     special_mode: Optional[str] = None
 
     # "None", "Sigmoid", "ReLU"
-    activation: str = "ReLU"
     output_activation: str = "None"
 
     def epoch_time_hash(
@@ -171,9 +179,6 @@ class RunParams:
                 self.kan_params.grid_radius,
                 self.kan_params.num_grids,
                 self.kan_params.use_base_update,
-                # NOTE: may add ekan-specific params in future.
-                # But this isn't a problem b/c network_type="ekan" should
-                # hash differently anyway.
             ]
             if self.kan_params
             else []
@@ -194,7 +199,6 @@ class RunParams:
             self.per_level_scale,
             self.log2_hashmap_size,
             self.base_resolution,
-            self.activation,
             self.output_activation,
             special_mode,
             dataset_name,

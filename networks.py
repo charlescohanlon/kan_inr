@@ -308,7 +308,6 @@ class MLP_Native(torch.nn.Module):
         bias=False,
         n_hidden_layers=3,
         n_neurons=64,
-        activation="ReLU",
         output_activation="None",
     ):
         super(MLP_Native, self).__init__()
@@ -318,7 +317,7 @@ class MLP_Native(torch.nn.Module):
 
         network_config = {
             "otype": "FullyFusedMLP",
-            "activation": activation,
+            "activation": "ReLU",  # NOTE: fixing MLP to use ReLU activation
             "output_activation": output_activation,
             "n_neurons": n_neurons,
             "n_hidden_layers": n_hidden_layers,
@@ -346,7 +345,7 @@ class MLP_Native(torch.nn.Module):
             bias=self.bias,
         )
 
-        self.activation = find_activation(activation)
+        self.activation = find_activation("ReLU")
         self.output_activation = find_activation(output_activation)
 
     def forward(self, x):
@@ -365,7 +364,6 @@ class MLP_TCNN(torch.nn.Module):
         seed=1337,
         n_hidden_layers=3,
         n_neurons=64,
-        activation="ReLU",
         output_activation="None",
     ):
         super(MLP_TCNN, self).__init__()
@@ -375,7 +373,7 @@ class MLP_TCNN(torch.nn.Module):
 
         network_config = {
             "otype": "FullyFusedMLP",
-            "activation": activation,
+            "activation": "ReLU",  # NOTE: fixing MLP to use ReLU activation
             "output_activation": output_activation,
             "n_neurons": n_neurons,
             "n_hidden_layers": n_hidden_layers,
@@ -418,9 +416,9 @@ class INR_Base(nn.Module):
         log2_hashmap_size=19,
         base_resolution=16,
         per_level_scale=2.0,
-        activation="ReLU",
         output_activation="None",
         suppress_encoder_nan=False,
+        special_mode="None",
         kan_params=None,
     ):
         super(INR_Base, self).__init__()
@@ -433,25 +431,36 @@ class INR_Base(nn.Module):
         ENCODER = HashEmbedderNative if native_encoder else HashEmbedderTCNN
         if self.network_type == "mlp":
             NETWORK = MLP_Native if native_network else MLP_TCNN
-        elif self.network_type == "ekan":
-            raise NotImplementedError("EKAN not supported in this version.")
+        elif self.network_type == "efficientkan":
             # if kan_params is not None:
             #     NETWORK = partial(
-            #         EKAN_Native,
+            #         EfficientKAN_Native,
             #         grid_size=kan_params.grid_size,
             #     )
             # else:
-            #     NETWORK = EKAN_Native
-        elif self.network_type == "fkan":
-            if kan_params is not None:
-                NETWORK = partial(
-                    FKAN_Native,
-                    grid_radius=kan_params.grid_radius,
-                    num_grids=kan_params.num_grids,
-                    use_base_update=kan_params.use_base_update,
-                )
-            else:
-                NETWORK = FKAN_Native
+            NETWORK = EfficientKAN_Native
+        elif self.network_type == "fastkan":
+            # if kan_params is not None:
+            #     NETWORK = partial(
+            #         FastKAN_Native,
+            #         grid_radius=kan_params.grid_radius,
+            #         num_grids=kan_params.num_grids,
+            #         use_base_update=kan_params.use_base_update,
+            #     )
+            # else:
+            NETWORK = FastKAN_Native
+        elif self.network_type == "siren":
+            NETWORK = SIREN_Native
+        elif self.network_type == "fourierkan":
+            # if kan_params is not None:
+            #     NETWORK = partial(
+            #         FourierKAN_Native,
+            #         grid_radius=kan_params.grid_radius,
+            #         num_grids=kan_params.num_grids,
+            #         use_base_update=kan_params.use_base_update,
+            #     )
+            # else:
+            NETWORK = FourierKAN_Native
         else:
             raise ValueError(f"Unsupported network type {network_type}")
 
@@ -476,7 +485,6 @@ class INR_Base(nn.Module):
             n_output_dims=n_output_dims,
             n_hidden_layers=n_hidden_layers,
             n_neurons=n_neurons,
-            activation=activation,
             output_activation=output_activation,
         )
 
@@ -492,90 +500,26 @@ class INR_Base(nn.Module):
         return self.network(x)
 
 
-class INR_TCNN(nn.Module):
-    def __init__(
-        self,
-        n_input_dims=3,
-        n_output_dims=1,
-        seed=1337,
-        # network paramerers
-        n_hidden_layers=3,
-        n_neurons=64,
-        # encoder paraparametersms
-        n_levels=16,
-        n_features_per_level=4,
-        log2_hashmap_size=19,
-        base_resolution=16,
-        per_level_scale=2.0,
-        activation="ReLU",
-        output_activation="None",
-    ):
-        super(INR_TCNN, self).__init__()
-
-        self.n_input_dims = n_input_dims
-        self.n_output_dims = n_output_dims
-
-        encoding_config = {
-            "otype": "HashGrid",
-            "n_levels": n_levels,
-            "n_features_per_level": n_features_per_level,
-            "log2_hashmap_size": log2_hashmap_size,
-            "base_resolution": base_resolution,
-            "per_level_scale": per_level_scale,
-        }
-
-        network_config = {
-            "otype": "FullyFusedMLP",
-            "activation": activation,
-            "output_activation": output_activation,
-            "n_neurons": n_neurons,
-            "n_hidden_layers": n_hidden_layers,
-            "feedback_alignment": False,
-        }
-
-        self.encoding_config = encoding_config
-        self.network_config = network_config
-
-        self.model = tinycudann.NetworkWithInputEncoding(
-            n_input_dims=n_input_dims,
-            n_output_dims=n_output_dims,
-            encoding_config=encoding_config,
-            network_config=network_config,
-            seed=seed,
-        )
-
-        self.encoding_func = EncodingFunction(
-            n_input_dims=n_input_dims, encoding_config=encoding_config
-        )
-
-    def forward(self, x):
-        return self.model(x)
-
-    def n_encoding_params(self):
-        return self.encoding_func.n_params()
-
-
-class FKAN_Native(torch.nn.Module):
+class FastKAN_Native(torch.nn.Module):
     def __init__(
         self,
         n_input_dims=3,
         n_output_dims=1,
         n_hidden_layers=3,
         n_neurons=64,
-        activation="SiLU",
         output_activation="None",
         grid_radius=1.0,
         num_grids=8,
         use_base_update=True,
     ):
-        super(FKAN_Native, self).__init__()
+        super(FastKAN_Native, self).__init__()
 
         self.n_input_dims = n_input_dims
         self.n_output_dims = n_output_dims
 
         network_config = {
             "otype": "FastKAN",
-            "activation": activation,
+            "activation": "SiLU",
             "output_activation": output_activation,
             "n_neurons": n_neurons,
             "n_hidden_layers": n_hidden_layers,
@@ -591,7 +535,6 @@ class FKAN_Native(torch.nn.Module):
         grid_min = -grid_radius
         grid_max = grid_radius
         layers_hidden = [n_input_dims] + [n_neurons] * n_hidden_layers + [n_output_dims]
-        base_activation = F.silu if activation == "SiLU" else F.relu
         self.output_activation = find_activation(output_activation)
 
         from fastkan import FastKAN
@@ -602,34 +545,32 @@ class FKAN_Native(torch.nn.Module):
             grid_max=grid_max,
             num_grids=num_grids,
             use_base_update=use_base_update,
-            base_activation=base_activation,
         )
 
     def forward(self, x):
         return self.output_activation(self.fkan(x))
 
 
-class EKAN_Native(torch.nn.Module):
+class EfficientKAN_Native(torch.nn.Module):
     def __init__(
         self,
         n_input_dims=3,
         n_output_dims=1,
         n_hidden_layers=3,
         n_neurons=64,
-        activation="SiLU",
         output_activation="None",
-        grid_size=5,
+        grid_size=8,
+        grid_radius=1.0,
         use_base_update=True,
-        base_activation=F.silu,
     ):
-        super(EKAN_Native, self).__init__()
+        super(EfficientKAN_Native, self).__init__()
 
         self.n_input_dims = n_input_dims
         self.n_output_dims = n_output_dims
 
         network_config = {
             "otype": "FastKAN",
-            "activation": activation,
+            "activation": "SiLU",
             "output_activation": output_activation,
             "n_neurons": n_neurons,
             "n_hidden_layers": n_hidden_layers,
@@ -646,15 +587,112 @@ class EKAN_Native(torch.nn.Module):
 
         from efficient_kan import KAN
 
-        self.ekan = KAN(
+        self.efficientkan = KAN(
             layers_hidden=layers_hidden,
             grid_size=grid_size,
-            use_base_update=use_base_update,
-            base_activation=base_activation,
+            grid_range=[-grid_radius, grid_radius],
         )
 
     def forward(self, x):
-        return self.ekan(x)
+        return self.efficientkan(x)
+
+
+class SIREN_Native(torch.nn.Module):
+    def __init__(
+        self,
+        n_input_dims=3,
+        n_output_dims=1,
+        n_hidden_layers=3,
+        n_neurons=64,
+        output_activation="None",
+        outermost_linear=False,
+        first_omega_0=30,
+        hidden_omega_0=30.0,
+    ):
+        super(SIREN_Native, self).__init__()
+
+        self.n_input_dims = n_input_dims
+        self.n_output_dims = n_output_dims
+
+        network_config = {
+            "otype": "SIREN",
+            "activation": "Sine",
+            "output_activation": output_activation,
+            "n_neurons": n_neurons,
+            "n_hidden_layers": n_hidden_layers,
+            "feedback_alignment": False,
+        }
+
+        self.n_hidden_layers = n_hidden_layers
+        self.n_neurons = n_neurons
+
+        self.network_config = network_config
+
+        assert n_hidden_layers >= 0, "expect at least one hidden layer"
+        self.output_activation = find_activation(output_activation)
+
+        from siren import Siren
+
+        self.siren = Siren(
+            in_features=n_input_dims,
+            hidden_features=n_neurons,
+            hidden_layers=n_hidden_layers,
+            out_features=n_output_dims,
+            outermost_linear=outermost_linear,
+            first_omega_0=first_omega_0,
+            hidden_omega_0=hidden_omega_0,
+        )
+
+    def forward(self, x):
+        # Siren forward returns (output, coords) but we only need the output
+        output = self.siren(x)
+        return self.output_activation(output)
+
+
+class FourierKAN_Native(torch.nn.Module):
+    def __init__(
+        self,
+        n_input_dims=3,
+        n_output_dims=1,
+        n_hidden_layers=3,
+        n_neurons=64,
+        output_activation="None",
+        grid_size=5,
+    ):
+        super(FourierKAN_Native, self).__init__()
+
+        self.n_input_dims = n_input_dims
+        self.n_output_dims = n_output_dims
+
+        network_config = {
+            "otype": "FourierKAN",
+            "activation": "Fourier",
+            "output_activation": output_activation,
+            "n_neurons": n_neurons,
+            "n_hidden_layers": n_hidden_layers,
+            "feedback_alignment": False,
+        }
+
+        self.n_hidden_layers = n_hidden_layers
+        self.n_neurons = n_neurons
+
+        self.network_config = network_config
+
+        assert n_hidden_layers >= 0, "expect at least one hidden layer"
+        self.output_activation = find_activation(output_activation)
+
+        from fourier_kan import FourierKAN_INR
+
+        self.fourier_kan = FourierKAN_INR(
+            in_features=n_input_dims,
+            hidden_features=n_neurons,
+            out_features=n_output_dims,
+            grid=grid_size,
+        )
+
+    def forward(self, x):
+        output = self.fourier_kan(x)
+        return self.output_activation(output)
 
 
 def coherent_prime_hash(coords, log2_hashmap_size=0):

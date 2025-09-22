@@ -9,6 +9,7 @@ import pickle
 from pathlib import Path
 from typing import List, Optional, Tuple
 from dataclasses import dataclass, fields
+import uuid
 import pandas as pd
 
 import hydra
@@ -49,6 +50,9 @@ class SubmissionConfig(BenchmarkConfig):
 
     # Retry any failed jobs found in log directory
     retry_failed: bool = True
+
+    # Option to filter out runs already running or queued
+    filter_running_or_queued: bool = True
 
 
 def get_test_epoch_key(cfg: SubmissionConfig, params: RunParams) -> str:
@@ -114,7 +118,7 @@ def submit_test_epoch_job(
     # Estimate walltime for test epoch runs
     time_in_minutes = max(len(run_indices) * cfg.num_minutes_per_job, 5)
     walltime = f"{int(time_in_minutes // 60):02d}:{int(time_in_minutes % 60):02d}:00"
-    job_name = f"te_w{worker_id}"
+    job_name = output_file.stem
 
     override_args = get_override_args(cfg)
     override_args.append("test_epoch_run=True")  # Ensure test epoch mode
@@ -225,7 +229,7 @@ def submit_pbs_job(
     worker_id: int = 0,
 ) -> str:
     walltime, num_gpus = get_pbs_walltime_and_gpus(cfg, params, epoch_time)
-    job_name = f"{params.network_type[:1]}_{params.dataset_name[:3]}_{run_index}"
+    job_name = f"{params.network_type[:2]}_{params.dataset_name[:3]}_{run_index}"
 
     with print_lock or nullcontext():
         print(f"\nJob {run_index}:")
@@ -366,15 +370,15 @@ def compute_and_submit_job_worker(
     try:
         # Then submit the test epoch script for runs needing computation
         job_idx_to_run = [run_index for run_index, _ in jobs_to_run]
-        test_epoch_file = cfg.test_epoch_dir / f"test_epoch_w{worker_id}.txt"
+        uid = str(uuid.uuid4())[:4]
+        test_epoch_file = cfg.test_epoch_dir / f"w{worker_id}_{uid}.txt"
         if not cfg.dry_run:
             test_epoch_job_id = submit_test_epoch_job(
                 cfg, job_idx_to_run, worker_id, test_epoch_file
             )
             while not test_epoch_file.exists():
-                time.sleep(
-                    30
-                )  # Wait for file to be created (first test epoch to finish)
+                # Wait for file to be created (first test epoch to finish)
+                time.sleep(30)
         else:
             create_dry_run_test_epoch_file(test_epoch_file, job_idx_to_run)
 
@@ -417,6 +421,10 @@ def compute_and_submit_job_worker(
         # (Attempt) to terminate test epoch job
         if test_epoch_job_id is not None:
             subprocess.run(["qdel", test_epoch_job_id])
+    finally:
+        # Clean up test epoch file
+        if test_epoch_file.exists():
+            test_epoch_file.unlink()
 
 
 def create_run_signature(cfg: BenchmarkConfig, params: RunParams) -> str:
@@ -742,22 +750,26 @@ def main(cfg: SubmissionConfig):
     else:
         aggregate_file = cfg.aggregated_results_dir / (params_name + ".csv")
 
-    if cfg.filter_from_aggregated and aggregate_file.exists():
-        if cfg.verbose:
-            print(f"Filtering runs already in aggregate file {aggregate_file}")
-        runs_list = filter_from_aggregate(cfg, aggregate_file, runs_list)
-        if cfg.verbose:
-            print(
-                f"Filtered out {before_len - len(runs_list)} jobs already in aggregate file"
-            )
-            before_len = len(runs_list)  # Update before_len for next filtering
+    if cfg.filter_from_aggregated:
+        if not aggregate_file.exists():
+            print(f"No aggregate file found at {aggregate_file}, skipping filtering.")
+        else:
+            if cfg.verbose:
+                print(f"Filtering runs already in aggregate file {aggregate_file}")
+            runs_list = filter_from_aggregate(cfg, aggregate_file, runs_list)
+            if cfg.verbose:
+                print(
+                    f"Filtered out {before_len - len(runs_list)} jobs already in aggregate file"
+                )
+                before_len = len(runs_list)  # Update before_len for next filtering
 
     # 3. Filter out runs already running or queued
-    runs_list = filter_running_or_queued(runs_list)
-    if cfg.verbose:
-        print(
-            f"Filtered out {before_len - len(runs_list)} jobs already running or queued"
-        )
+    if cfg.filter_running_or_queued:
+        runs_list = filter_running_or_queued(runs_list)
+        if cfg.verbose:
+            print(
+                f"Filtered out {before_len - len(runs_list)} jobs already running or queued"
+            )
 
     print(f"Total runs to submit: {len(runs_list)}")
     if len(runs_list) == 0:
@@ -767,6 +779,10 @@ def main(cfg: SubmissionConfig):
     if cfg.verbose:
         datasets = set(r.dataset_name for _, r in runs_list)
         print(f"Datasets to process: {', '.join(sorted(datasets))}")
+        print(
+            f"Network types to process: {', '.join(sorted(set(r.network_type for _, r in runs_list)))}"
+        )
+        print()
 
     if cfg.use_memoization:
         test_epoch_dict = load_test_epoch_memoization(cfg)
@@ -842,6 +858,8 @@ def main(cfg: SubmissionConfig):
             print(
                 f"  Worker {worker_id} running {len(jobs_to_run)} jobs: {[i for i, _ in jobs_to_run]}"
             )
+        if len(jobs_to_run) == 0:
+            continue
         p = Process(
             target=compute_and_submit_job_worker,
             args=(
@@ -881,26 +899,27 @@ def main(cfg: SubmissionConfig):
             p.join()
         test_epoch_manager.shutdown()
         return
-    finally:
-        # Clear out the test_epochs directory
-        for f in cfg.test_epoch_dir.glob("test_epoch_w*.txt"):
-            f.unlink()
 
     if cfg.dry_run:
         print("\nDry run complete, exiting.")
         test_epoch_manager.shutdown()
         return
 
-    # Wait for all jobs to complete
-    print("\nWaiting for all jobs to complete.")
-    while True:
-        current_jobs = get_queued_jobs()
-        if current_jobs == 0:
-            break
-        time.sleep(5 * 60)
-        if cfg.verbose:
-            print(f"  {current_jobs} jobs still in queue, waiting...")
-    print("All jobs completed.")
+    try:
+        # Wait for all jobs to complete
+        print("\nWaiting for all jobs to complete.")
+        while True:
+            current_jobs = get_queued_jobs()
+            if current_jobs == 0:
+                break
+            time.sleep(5 * 60)
+            if cfg.verbose:
+                print(f"  {current_jobs} jobs still in queue, waiting...")
+        print("All jobs completed.")
+    except KeyboardInterrupt:
+        print("\nInterrupted by user, exiting.")
+        test_epoch_manager.shutdown()
+        return
 
     # Retry any failed jobs found in the log directory
     if cfg.retry_failed:
