@@ -1,0 +1,70 @@
+{
+    "tacc_turbulence": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 4,
+            "n_levels": 1,
+            "n_features_per_level": 4,
+            "per_level_scale": 1.5,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": 0,
+            "log2_hashmap_size_step": 3,
+            "zfp_enc": 0.044,
+            "zfp_mlp": 0.022
+        }
+    ],
+    "kingsnake": [
+        {
+            "lrate": 0.01,
+            "lrate_decay": 18,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 4,
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 1.1,
+            "log2_hashmap_size": 0,
+            "log2_hashmap_size_step": 3,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "zfp_enc": 0.02,
+            "zfp_mlp": 0.01
+        }
+    ],
+    "marmoset_neurons": [
+        {
+            "lrate": 0.008,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 4,
+            "n_levels": 1,
+            "n_features_per_level": 4,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": 0,
+            "log2_hashmap_size_step": 3,
+            "zfp_enc": 0.024,
+            "zfp_mlp": 0.012
+        }
+    ],
+    "hcci_oh": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 4,
+            "n_levels": 1,
+            "n_features_per_level": 4,
+            "per_level_scale": 1.5,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": 0,
+            "log2_hashmap_size_step": 3,
+            "zfp_enc": 0.044,
+            "zfp_mlp": 0.022
+        }
+    ]
+}

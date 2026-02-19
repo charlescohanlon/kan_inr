@@ -31,7 +31,7 @@ class SubmissionConfig(BenchmarkConfig):
     num_minutes_per_job: float = 3  # Expected minutes per job for test epoch
     compute_epoch_time_only: bool = False
     num_workers: int = 4  # Number of parallel workers test_epoch test epochs
-    time_scaler: float = 1  # Scaling factor for estimating time
+    time_scaler: float = 1  # Scaling factor for calculating walltime from test epoch
 
     # Directories for logs and memoization
     log_dir: Path = Path(BenchmarkConfig.home_dir) / "kan_inr" / "logs"
@@ -42,9 +42,7 @@ class SubmissionConfig(BenchmarkConfig):
 
     # Directory for operations with aggregated results
     aggregated_results_dir: Path = Path(BenchmarkConfig.home_dir) / "aggregated_results"
-    aggregate_file: Optional[Path] = (
-        None  # If None, will be auto-named the same as params file
-    )
+    aggregate_file: Optional[Path] = "sweeps.csv"
     filter_from_aggregated: bool = True  # Filter jobs already in aggregate file
     aggregate_results: bool = True  # Aggregate results after submission
 
@@ -60,7 +58,6 @@ def get_test_epoch_key(cfg: SubmissionConfig, params: RunParams) -> str:
     return str(
         params.epoch_time_hash(
             safety_margin=cfg.safety_margin,
-            dataset_name=params.dataset_name,
             ssd_dir_provided=cfg.ssd_dir is not None,
         )
     )
@@ -83,18 +80,15 @@ def load_test_epoch_memoization(cfg: SubmissionConfig) -> dict:
     return {}
 
 
-def save_test_epoch_memoization(
-    cfg: SubmissionConfig, test_epoch_dict_proxy, test_epoch_lock
-) -> bool:
+def save_test_epoch_memoization(cfg: SubmissionConfig, test_epoch_dict_proxy) -> bool:
     """Save test_epoch results to memoization file when new ones computed"""
-    with test_epoch_lock:
-        try:
-            with open(cfg.test_epoch_memo_file, "wb") as f:
-                pickle.dump(dict(test_epoch_dict_proxy), f)
-            return True
-        except (pickle.PickleError, OSError) as e:
-            print(f"Warning: Could not save test epoch memoization file: {e}")
-            return False
+    try:
+        with open(cfg.test_epoch_memo_file, "wb") as f:
+            pickle.dump(dict(test_epoch_dict_proxy), f)
+        return True
+    except (pickle.PickleError, OSError) as e:
+        print(f"Warning: Could not save test epoch memoization file: {e}")
+        return False
 
 
 def get_override_args(cfg: SubmissionConfig) -> List[str]:
@@ -116,7 +110,7 @@ def submit_test_epoch_job(
 ) -> str:
     """Create a bash script for testing single epochs"""
     # Estimate walltime for test epoch runs
-    time_in_minutes = max(len(run_indices) * cfg.num_minutes_per_job, 5)
+    time_in_minutes = min(max(len(run_indices) * cfg.num_minutes_per_job, 5), 60 * 24)
     walltime = f"{int(time_in_minutes // 60):02d}:{int(time_in_minutes % 60):02d}:00"
     job_name = output_file.stem
 
@@ -134,7 +128,6 @@ def submit_test_epoch_job(
 #PBS -N {job_name}
 #PBS -o /dev/null
 #PBS -e /dev/null
-#PBS -m n
 # -----------------------------------
 
 source /grand/insitu/cohanlon/miniconda3/etc/profile.d/conda.sh 
@@ -356,7 +349,7 @@ def create_dry_run_test_epoch_file(output_file: Path, compute_indices: List[int]
             f.write(f"run_index: {run_index}, time_elapsed: {fake_time}\n")
 
 
-def compute_and_submit_job_worker(
+def worker_submit_job(
     cfg: SubmissionConfig,
     worker_id: int,
     jobs_to_run: List[Tuple[int, RunParams]],
@@ -400,6 +393,7 @@ def compute_and_submit_job_worker(
                 key = get_test_epoch_key(cfg, params)
                 with test_epoch_lock:
                     test_epoch_dict[key] = time_elapsed
+                    save_test_epoch_memoization(cfg, test_epoch_dict)
 
                 if (run_index in jobs_run) or cfg.compute_epoch_time_only:
                     continue
@@ -459,6 +453,7 @@ def create_run_signature(cfg: BenchmarkConfig, params: RunParams) -> str:
                     params.per_level_scale,
                     params.log2_hashmap_size,
                     params.base_resolution,
+                    params.seed,
                     cfg.repeats,
                 ],
             )
@@ -497,6 +492,7 @@ def create_csv_row_signature(row: pd.Series, cfg: BenchmarkConfig) -> str:
                     row["per_level_scale"],
                     row["log2_hashmap_size"],
                     row["base_resolution"],
+                    row["seed"],
                     cfg.repeats,
                 ],
             )
@@ -525,6 +521,8 @@ def filter_from_aggregate(
     Returns:
         List of runs not found in the aggregate file
     """
+    if not aggregate_file.exists():
+        return runs
     aggregate_df = pd.read_csv(aggregate_file)
 
     # Precompute signatures for all existing results (O(n))
@@ -666,7 +664,7 @@ def retry_failed_jobs(
             if oom_error:
                 # NOTE: not re-calculating epoch time, we're hoping smaller
                 # batch size doesn't result in exceeding job walltime
-                params.safety_margin -= 0.1
+                cfg.safety_margin -= 0.1
             submit_pbs_job(cfg, run_index, params, epoch_time, log_dir)
 
 
@@ -697,6 +695,8 @@ def main(cfg: SubmissionConfig):
         print(f"  Queue Job Wait time: {cfg.wait_time} seconds")
         print(f"  Dry run: {cfg.dry_run}")
         print(f"  Verbose: {cfg.verbose}")
+        print(f"  Num workers: {cfg.num_workers}")
+        print(f"  Num minutes per test epoch job: {cfg.num_minutes_per_job}")
         if cfg.dataset:
             print(f"  Dataset filter: {cfg.dataset}")
         if cfg.hashmap_size:
@@ -743,10 +743,6 @@ def main(cfg: SubmissionConfig):
     # Path to aggregated results file
     if cfg.aggregate_file is not None:
         aggregate_file = cfg.aggregated_results_dir / cfg.aggregate_file
-        if not aggregate_file.exists():
-            raise FileNotFoundError(
-                f"Specified aggregate_file {aggregate_file} does not exist"
-            )
     else:
         aggregate_file = cfg.aggregated_results_dir / (params_name + ".csv")
 
@@ -861,7 +857,7 @@ def main(cfg: SubmissionConfig):
         if len(jobs_to_run) == 0:
             continue
         p = Process(
-            target=compute_and_submit_job_worker,
+            target=worker_submit_job,
             args=(
                 cfg,
                 worker_id,

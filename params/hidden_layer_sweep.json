@@ -1,0 +1,162 @@
+{
+    "beechnut": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "chameleon": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "magnetic_reconnection": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "pawpawsaurus": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "hcci_oh": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "kingsnake": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "marmoset_neurons": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "spathorhynchus": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "statue_leg": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ],
+    "frog": [
+        {
+            "lrate": 0.004,
+            "lrate_decay": 16,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                5
+            ],
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5
+            }
+        }
+    ]
+}

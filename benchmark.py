@@ -38,11 +38,6 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import hashlib
 
-# Set seeds for reproducibility across all devices
-torch.manual_seed(0)  # for reproducibility
-if torch.cuda.is_available():
-    torch.cuda.manual_seed_all(0)
-
 
 @dataclass
 class BenchmarkConfig:
@@ -66,6 +61,8 @@ class BenchmarkConfig:
         ssd_dir: Optional SSD directory for faster I/O during training
         test_epoch_run: If True, only run one epoch to estimate time (for job scheduling)
         output_dir: Directory to save result CSV
+        override_siren_lr: Whether to override learning rate for SIREN networks to 1e-4
+        num_seeds: Number of seeds to use (will enumerate from 0 to num_seeds-1)
     """
 
     params_file: str = "params"
@@ -86,13 +83,15 @@ class BenchmarkConfig:
     enable_pbar: bool = True
     repeats: int = 1
     save_mode: Optional[str] = None
-    safety_margin: float = 0.8
+    safety_margin: float = 0.7
     dataset: Optional[str] = None
     hashmap_size: Optional[int] = None
     epochs: Optional[int] = None
     ssd_dir: Optional[str] = None
     test_epoch_run: bool = False
     output_dir: str = str(Path(home_dir) / "results")
+    override_siren_lr: bool = True
+    num_seeds: int = 1
 
 
 @dataclass
@@ -106,6 +105,7 @@ class KANParams:
         num_grids: Number of grids in KAN (can also be a list of two bounds)
         num_grids_step: Step size for num_grids adjustment
         use_base_update: Whether to use base update in KAN
+        num_neurons: Number of neurons in KAN MLP (ignored if None)
     """
 
     grid_radius: float = 1.0
@@ -113,6 +113,7 @@ class KANParams:
     num_grids: int = 8
     num_grids_step: int = 1
     use_base_update: bool = True
+    num_neurons: Optional[int] = None
 
 
 @dataclass
@@ -148,23 +149,22 @@ class RunParams:
     epochs: int
     n_neurons: int
     n_hidden_layers: int
-    n_levels: int
-    n_features_per_level: int
-    per_level_scale: float
-    log2_hashmap_size: int
-    base_resolution: str
+    n_levels: Optional[int]
+    n_features_per_level: Optional[int]
+    per_level_scale: Optional[float]
+    log2_hashmap_size: Optional[int]
+    base_resolution: Optional[str]
     zfp_enc: float
     zfp_mlp: float
     log2_hashmap_size_step: int = 1
     kan_params: Optional[KANParams] = None
     special_mode: Optional[str] = None
+    seed: int = 0
 
     # "None", "Sigmoid", "ReLU"
     output_activation: str = "None"
 
-    def epoch_time_hash(
-        self, safety_margin: int, dataset_name: str, ssd_dir_provided: bool
-    ) -> int:
+    def epoch_time_hash(self, safety_margin: int, ssd_dir_provided: bool) -> int:
         """
         Custom hash function for a run's epoch time to uniquely identify configurations.
         Considers parameters relevant to training epoch time, excluding those that don't affect it.
@@ -190,18 +190,12 @@ class RunParams:
         config_tuple = (
             self.dataset_name,
             self.network_type,
-            self.lrate,
-            self.lrate_decay,
             self.n_neurons,
             self.n_hidden_layers,
             self.n_levels,
             self.n_features_per_level,
-            self.per_level_scale,
             self.log2_hashmap_size,
-            self.base_resolution,
-            self.output_activation,
             special_mode,
-            dataset_name,
             safety_margin,
             ssd_dir_provided,
             *kan_params,
@@ -236,6 +230,11 @@ def run_benchmark(
         world_size: Total number of processes
         local_rank: Local rank for GPU assignment
     """
+    torch.manual_seed(params.seed)
+    np.random.seed(params.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(params.seed)
+
     # Check if we're in DDP mode
     is_ddp = dist.is_initialized()
     is_main_process = rank == 0
@@ -268,6 +267,10 @@ def run_benchmark(
     psnrs, ssims, mses = [], [], []
     num_repeats = cfg.repeats
 
+    n_neurons = params.n_neurons
+    if params.kan_params is not None and params.kan_params.num_neurons is not None:
+        n_neurons = params.kan_params.num_neurons
+
     # Run multiple training sessions and average the results
     for repeat in range(num_repeats):  # averages results over num_repeats many runs
         if is_main_process:
@@ -281,7 +284,7 @@ def run_benchmark(
             native_network=native_network,
             network_type=params.network_type,
             n_hidden_layers=params.n_hidden_layers,
-            n_neurons=params.n_neurons,
+            n_neurons=n_neurons,
             n_levels=params.n_levels,
             n_features_per_level=params.n_features_per_level,
             log2_hashmap_size=params.log2_hashmap_size,
@@ -463,7 +466,6 @@ def run_benchmark(
         pbs_array_index = os.getenv("PBS_ARRAY_INDEX", 0)
         epoch_time_hash = params.epoch_time_hash(
             safety_margin=cfg.safety_margin,
-            dataset_name=params.dataset_name,
             ssd_dir_provided=cfg.ssd_dir is not None,
         )
 
@@ -508,6 +510,7 @@ def run_benchmark(
                         "pbs_job_id",
                         "pbs_array_index",
                         "epoch_time_hash",
+                        "seed",
                         "avg_psnr",
                         "std_dev_psnr",
                         "avg_ssim",
@@ -546,6 +549,7 @@ def run_benchmark(
                             pbs_job_id,
                             pbs_array_index,
                             epoch_time_hash,
+                            params.seed,
                             avg_psnr,
                             std_dev_psnr,
                             avg_ssim,
@@ -1236,139 +1240,178 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
     params_file = OmegaConf.load(params_dir / filename)
     runs: List[RunParams] = []
 
-    # Iterate through each dataset in the params file
-    for dataset_name, params in params_file.items():
-        for param in params:
-            # Parameter sweeps
-            hashmap_sizes = param["log2_hashmap_size"]
-            log2_hashmap_size_bounds = (
-                [hashmap_sizes] if isinstance(hashmap_sizes, int) else hashmap_sizes
-            )
-
-            n_neurons = param["n_neurons"]
-            n_neurons_bounds = [n_neurons] if isinstance(n_neurons, int) else n_neurons
-
-            n_hidden_layers = param["n_hidden_layers"]
-            n_hidden_layers_bounds = (
-                [n_hidden_layers]
-                if isinstance(n_hidden_layers, int)
-                else n_hidden_layers
-            )
-
-            n_levels = param["n_levels"]
-            n_levels_bounds = [n_levels] if isinstance(n_levels, int) else n_levels
-
-            n_features_per_level = param["n_features_per_level"]
-            n_features_per_level_bounds = (
-                [n_features_per_level]
-                if isinstance(n_features_per_level, int)
-                else n_features_per_level
-            )
-
-            grid_radius = KANParams.grid_radius
-            grid_radius_step = KANParams.grid_radius_step
-            num_grids = KANParams.num_grids
-            num_grids_step = KANParams.num_grids_step
-            if "kan_params" in param:
-                kan_params = param["kan_params"]
-                if "grid_radius" in kan_params:
-                    grid_radius = kan_params.grid_radius
-                if "grid_radius_step" in kan_params:
-                    grid_radius_step = kan_params.grid_radius_step
-                if "num_grids" in kan_params:
-                    num_grids = kan_params.num_grids
-                if "num_grids_step" in kan_params:
-                    num_grids_step = kan_params.num_grids_step
-
-            if isinstance(grid_radius, float) or isinstance(grid_radius, int):
-                grid_radius_bounds = [grid_radius]
-            else:
-                grid_radius_bounds = grid_radius
-
-            num_grids_bounds = [num_grids] if isinstance(num_grids, int) else num_grids
-
-            # Handle dynamic base resolution calculation
-            dependent_base_resolution = False
-            if param["base_resolution"] == "(int)cbrt(1<<log2_hashmap_size)":
-                # Compute base resolution from hashmap size
-                # This creates a resolution that scales with the hash table
-                dependent_base_resolution = True
-            elif not isinstance(param["base_resolution"], int):
-                raise ValueError(
-                    "base_resolution must be an int or (int)cbrt(1<<log2_hashmap_size)"
+    for seed in range(cfg.num_seeds):
+        # Iterate through each dataset in the params file
+        for dataset_name, params in params_file.items():
+            for param in params:
+                # Parse non-encoder parameters first
+                n_neurons = param["n_neurons"]
+                n_neurons_bounds = (
+                    [n_neurons] if isinstance(n_neurons, int) else n_neurons
                 )
 
-            log2_hashmap_size_step = param.get("log2_hashmap_size_step", 1)
+                n_hidden_layers = param["n_hidden_layers"]
+                n_hidden_layers_bounds = (
+                    [n_hidden_layers]
+                    if isinstance(n_hidden_layers, int)
+                    else n_hidden_layers
+                )
 
-            # Generate runs for all combinations
-            for log2_hashmap_size in range(
-                log2_hashmap_size_bounds[0],
-                log2_hashmap_size_bounds[-1] + log2_hashmap_size_step,
-                log2_hashmap_size_step,
-            ):
-                if dependent_base_resolution:
-                    # Calculate cube root of 2^size for base resolution
-                    base_resolution = int((1 << log2_hashmap_size) ** (1 / 3))
+                grid_radius = KANParams.grid_radius
+                grid_radius_step = KANParams.grid_radius_step
+                num_grids = KANParams.num_grids
+                num_grids_step = KANParams.num_grids_step
+                kan_neurons = KANParams.num_neurons
+                if "kan_params" in param:
+                    kan_params = param["kan_params"]
+                    if "grid_radius" in kan_params:
+                        grid_radius = kan_params.grid_radius
+                    if "grid_radius_step" in kan_params:
+                        grid_radius_step = kan_params.grid_radius_step
+                    if "num_grids" in kan_params:
+                        num_grids = kan_params.num_grids
+                    if "num_grids_step" in kan_params:
+                        num_grids_step = kan_params.num_grids_step
+                    if "num_neurons" in kan_params:
+                        num_neurons = kan_params.num_neurons
+
+                if isinstance(grid_radius, float) or isinstance(grid_radius, int):
+                    grid_radius_bounds = [grid_radius]
                 else:
-                    base_resolution = param["base_resolution"]
+                    grid_radius_bounds = grid_radius
 
-                for n_neurons in range(n_neurons_bounds[0], n_neurons_bounds[-1] + 1):
-                    for n_hidden_layers in range(
-                        n_hidden_layers_bounds[0], n_hidden_layers_bounds[-1] + 1
+                num_grids_bounds = (
+                    [num_grids] if isinstance(num_grids, int) else num_grids
+                )
+
+                hashmap_sizes = param["log2_hashmap_size"]
+                log2_hashmap_size_bounds = (
+                    [hashmap_sizes] if isinstance(hashmap_sizes, int) else hashmap_sizes
+                )
+                if (
+                    len(log2_hashmap_size_bounds) == 1
+                    and log2_hashmap_size_bounds[0] == 0
+                ):
+                    # If hashmap size is 0, set other dependent params to 0
+                    # Don't try to read other related params
+                    n_levels_bounds = [0]
+                    n_features_per_level_bounds = [0]
+                    dependent_base_resolution = True
+                    hashmap_sizes = [0]
+                    per_level_scale = 1.0
+                else:
+                    n_levels = param["n_levels"]
+                    n_levels_bounds = (
+                        [n_levels] if isinstance(n_levels, int) else n_levels
+                    )
+
+                    n_features_per_level = param["n_features_per_level"]
+                    n_features_per_level_bounds = (
+                        [n_features_per_level]
+                        if isinstance(n_features_per_level, int)
+                        else n_features_per_level
+                    )
+
+                    # Handle dynamic base resolution calculation
+                    dependent_base_resolution = False
+                    if param["base_resolution"] == "(int)cbrt(1<<log2_hashmap_size)":
+                        # Compute base resolution from hashmap size
+                        # This creates a resolution that scales with the hash table
+                        dependent_base_resolution = True
+                    elif not isinstance(param["base_resolution"], int):
+                        raise ValueError(
+                            "base_resolution must be an int or (int)cbrt(1<<log2_hashmap_size)"
+                        )
+
+                    per_level_scale = param["per_level_scale"]
+
+                    log2_hashmap_size_step = None
+                    if "log2_hashmap_size_step" in param:
+                        log2_hashmap_size_step = param["log2_hashmap_size_step"]
+                        if len(log2_hashmap_size_bounds) != 2:
+                            raise ValueError(
+                                "log2_hashmap_size_step requires exactly 2 values in log2_hashmap_size"
+                            )
+                    else:
+                        log2_hashmap_size_step = 1
+
+                    hashmap_sizes = range(
+                        log2_hashmap_size_bounds[0],
+                        log2_hashmap_size_bounds[-1] + log2_hashmap_size_step,
+                        log2_hashmap_size_step,
+                    )
+
+                # Generate runs for all combinations
+                for log2_hashmap_size in hashmap_sizes:
+                    if dependent_base_resolution:
+                        # Calculate cube root of 2^size for base resolution
+                        base_resolution = int((1 << log2_hashmap_size) ** (1 / 3))
+                    else:
+                        base_resolution = param["base_resolution"]
+
+                    for n_neurons in range(
+                        n_neurons_bounds[0], n_neurons_bounds[-1] + 1
                     ):
-                        for n_levels in range(
-                            n_levels_bounds[0], n_levels_bounds[-1] + 1
+                        for n_hidden_layers in range(
+                            n_hidden_layers_bounds[0], n_hidden_layers_bounds[-1] + 1
                         ):
-                            for n_features_per_level in range(
-                                n_features_per_level_bounds[0],
-                                n_features_per_level_bounds[-1] + 1,
+                            for n_levels in range(
+                                n_levels_bounds[0], n_levels_bounds[-1] + 1
                             ):
-                                for network_type in cfg.network_types:
-                                    partial_run_params = partial(
-                                        RunParams,
-                                        dataset_name=dataset_name,
-                                        network_type=network_type,
-                                        lrate=param["lrate"],
-                                        lrate_decay=param["lrate_decay"],
-                                        epochs=param["epochs"],
-                                        n_neurons=n_neurons,
-                                        n_hidden_layers=n_hidden_layers,
-                                        n_levels=n_levels,
-                                        n_features_per_level=n_features_per_level,
-                                        per_level_scale=param["per_level_scale"],
-                                        base_resolution=base_resolution,
-                                        log2_hashmap_size=log2_hashmap_size,
-                                        zfp_enc=param["zfp_enc"],
-                                        zfp_mlp=param["zfp_mlp"],
-                                    )
-                                    if "kan" not in network_type.lower():
-                                        run_params = partial_run_params(kan_params=None)
-                                        runs.append(run_params)
-                                        continue
-
-                                    # KAN parameter sweeps
-                                    for grid_radius in np.arange(
-                                        grid_radius_bounds[0],
-                                        grid_radius_bounds[-1] + grid_radius_step,
-                                        grid_radius_step,  # Use arange for float steps
-                                    ):
-                                        for num_grids in range(
-                                            num_grids_bounds[0],
-                                            num_grids_bounds[-1] + num_grids_step,
-                                            num_grids_step,
-                                        ):
-                                            kan_params = KANParams(
-                                                grid_radius=float(grid_radius),
-                                                grid_radius_step=float(
-                                                    grid_radius_step
-                                                ),
-                                                num_grids=int(num_grids),
-                                                num_grids_step=int(num_grids_step),
-                                            )
+                                for n_features_per_level in range(
+                                    n_features_per_level_bounds[0],
+                                    n_features_per_level_bounds[-1] + 1,
+                                ):
+                                    for network_type in cfg.network_types:
+                                        partial_run_params = partial(
+                                            RunParams,
+                                            dataset_name=dataset_name,
+                                            network_type=network_type,
+                                            lrate=param["lrate"],
+                                            lrate_decay=param["lrate_decay"],
+                                            epochs=param["epochs"],
+                                            n_neurons=n_neurons,
+                                            n_hidden_layers=n_hidden_layers,
+                                            n_levels=n_levels,
+                                            n_features_per_level=n_features_per_level,
+                                            per_level_scale=per_level_scale,
+                                            base_resolution=base_resolution,
+                                            log2_hashmap_size=log2_hashmap_size,
+                                            zfp_enc=0,
+                                            zfp_mlp=0,
+                                            seed=int(seed),
+                                        )
+                                        if "kan" not in network_type.lower():
                                             run_params = partial_run_params(
-                                                kan_params=kan_params
+                                                kan_params=None
                                             )
                                             runs.append(run_params)
+                                            continue
+
+                                        # KAN parameter sweeps
+                                        for grid_radius in np.arange(
+                                            grid_radius_bounds[0],
+                                            grid_radius_bounds[-1] + grid_radius_step,
+                                            grid_radius_step,  # Use arange for float steps
+                                        ):
+                                            for num_grids in range(
+                                                num_grids_bounds[0],
+                                                num_grids_bounds[-1] + num_grids_step,
+                                                num_grids_step,
+                                            ):
+                                                kan_params = KANParams(
+                                                    grid_radius=float(grid_radius),
+                                                    grid_radius_step=float(
+                                                        grid_radius_step
+                                                    ),
+                                                    num_grids=int(num_grids),
+                                                    num_grids_step=int(num_grids_step),
+                                                    kan_neurons=kan_neurons,
+                                                )
+                                                run_params = partial_run_params(
+                                                    kan_params=kan_params
+                                                )
+                                                runs.append(run_params)
 
     # Apply filters if specified
     if cfg.dataset is not None:
@@ -1530,6 +1573,17 @@ def main(cfg: BenchmarkConfig):
 
         should_save = params.log2_hashmap_size == specific_hashmap_size
 
+    # Override learning rate for SIREN networks if specified
+    if params.network_type.lower() == "siren" and cfg.override_siren_lr:
+        if is_main_process:
+            print(f"Overriding learning rate for SIREN from {params.lrate} to 1e-4")
+        params.lrate = 1e-4
+
+    if params.network_type.lower() == "efficientkan":
+        cfg.safety_margin = 0.65
+        if is_main_process:
+            print(f"Using safety margin of {cfg.safety_margin} for EfficientKAN")
+
     if is_main_process:
         start_time = time()
         print(f"Running w/ parameters:")
@@ -1537,7 +1591,6 @@ def main(cfg: BenchmarkConfig):
         print("Saving INR:", should_save)
 
     try:
-        # Run the actual benchmark
         run_benchmark(
             data_path,
             params,

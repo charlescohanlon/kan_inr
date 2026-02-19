@@ -608,6 +608,7 @@ class SIREN_Native(torch.nn.Module):
         outermost_linear=False,
         first_omega_0=30,
         hidden_omega_0=30.0,
+        use_residual=False,
     ):
         super(SIREN_Native, self).__init__()
 
@@ -631,17 +632,19 @@ class SIREN_Native(torch.nn.Module):
         assert n_hidden_layers >= 0, "expect at least one hidden layer"
         self.output_activation = find_activation(output_activation)
 
-        from siren import Siren
+        from siren import FieldNet
 
-        self.siren = Siren(
-            in_features=n_input_dims,
-            hidden_features=n_neurons,
-            hidden_layers=n_hidden_layers,
-            out_features=n_output_dims,
-            outermost_linear=outermost_linear,
-            first_omega_0=first_omega_0,
-            hidden_omega_0=hidden_omega_0,
-        )
+        # Create options object for FieldNet
+        class SirenOpt:
+            def __init__(self):
+                self.d_in = n_input_dims
+                self.layers = [n_neurons] * n_hidden_layers
+                self.d_out = n_output_dims
+                self.w0 = first_omega_0  # Use first_omega_0 for w0
+                self.is_residual = use_residual
+
+        opt = SirenOpt()
+        self.siren = FieldNet(opt)
 
     def forward(self, x):
         # Siren forward returns (output, coords) but we only need the output

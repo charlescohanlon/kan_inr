@@ -3,7 +3,7 @@
 #PBS -A insitu
 #PBS -q by-gpu
 #PBS -l select=1:ncpus=8:gputype=A100:system=sophia
-#PBS -l walltime=01:00:00
+#PBS -l walltime=01:45:00
 #PBS -l filesystems=home:grand
 #PBS -o /grand/insitu/cohanlon/kan_inr/logs/
 #PBS -e /grand/insitu/cohanlon/kan_inr/logs/
@@ -20,4 +20,7 @@ echo "Number of GPUs detected: $NUM_GPUS on host $(hostname)"
 
 # Use the benchmark.py program to fit an INR, then decompress and save the result
 torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
-    benchmark.py -cn config params_file=params
+    benchmark.py -cn config \
+        params_file=hashmap_size_sweep \
+        safety_margin=0.7
+

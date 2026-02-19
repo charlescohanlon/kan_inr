@@ -1,21 +1,12 @@
-import torch
+"""
+Modifiend from https://github.com/matthewberger/neurcomp/blob/main/siren.py
+"""
+import torch as th
 import torch.nn as nn
 import numpy as np
-from collections import OrderedDict
-
-# From https://github.com/vsitzmann/siren/blob/master/explore_siren.ipynb
 
 
 class SineLayer(nn.Module):
-    # See paper sec. 3.2, final paragraph, and supplement Sec. 1.5 for discussion of omega_0.
-
-    # If is_first=True, omega_0 is a frequency factor which simply multiplies the activations before the
-    # nonlinearity. Different signals may require different omega_0 in the first layer - this is a
-    # hyperparameter.
-
-    # If is_first=False, then the weights will be divided by omega_0 so as to keep the magnitude of
-    # activations constant, but boost gradients to the weight matrix (see supplement Sec. 1.5)
-
     def __init__(
         self, in_features, out_features, bias=True, is_first=False, omega_0=30
     ):
@@ -28,8 +19,10 @@ class SineLayer(nn.Module):
 
         self.init_weights()
 
+    #
+
     def init_weights(self):
-        with torch.no_grad():
+        with th.no_grad():
             if self.is_first:
                 self.linear.weight.uniform_(-1 / self.in_features, 1 / self.in_features)
             else:
@@ -37,99 +30,171 @@ class SineLayer(nn.Module):
                     -np.sqrt(6 / self.in_features) / self.omega_0,
                     np.sqrt(6 / self.in_features) / self.omega_0,
                 )
+            #
+        #
+
+    #
 
     def forward(self, input):
-        return torch.sin(self.omega_0 * self.linear(input))
+        return th.sin(self.omega_0 * self.linear(input))
 
-    def forward_with_intermediate(self, input):
-        # For visualization of activation distributions
-        intermediate = self.omega_0 * self.linear(input)
-        return torch.sin(intermediate), intermediate
+    #
 
 
-class Siren(nn.Module):
+#
+
+
+class ResidualSineLayer(nn.Module):
     def __init__(
-        self,
-        in_features,
-        hidden_features,
-        hidden_layers,
-        out_features,
-        outermost_linear=False,
-        first_omega_0=30,
-        hidden_omega_0=30.0,
+        self, features, bias=True, ave_first=False, ave_second=False, omega_0=30
     ):
         super().__init__()
+        self.omega_0 = omega_0
 
-        self.net = []
-        self.net.append(
-            SineLayer(
-                in_features, hidden_features, is_first=True, omega_0=first_omega_0
+        self.features = features
+        self.linear_1 = nn.Linear(features, features, bias=bias)
+        self.linear_2 = nn.Linear(features, features, bias=bias)
+
+        self.weight_1 = 0.5 if ave_first else 1
+        self.weight_2 = 0.5 if ave_second else 1
+
+        self.init_weights()
+
+    #
+
+    def init_weights(self):
+        with th.no_grad():
+            self.linear_1.weight.uniform_(
+                -np.sqrt(6 / self.features) / self.omega_0,
+                np.sqrt(6 / self.features) / self.omega_0,
             )
-        )
-
-        for i in range(hidden_layers):
-            self.net.append(
-                SineLayer(
-                    hidden_features,
-                    hidden_features,
-                    is_first=False,
-                    omega_0=hidden_omega_0,
-                )
+            self.linear_2.weight.uniform_(
+                -np.sqrt(6 / self.features) / self.omega_0,
+                np.sqrt(6 / self.features) / self.omega_0,
             )
+        #
 
-        if outermost_linear:
-            final_linear = nn.Linear(hidden_features, out_features)
+    #
 
-            with torch.no_grad():
-                final_linear.weight.uniform_(
-                    -np.sqrt(6 / hidden_features) / hidden_omega_0,
-                    np.sqrt(6 / hidden_features) / hidden_omega_0,
-                )
+    def forward(self, input):
+        sine_1 = th.sin(self.omega_0 * self.linear_1(self.weight_1 * input))
+        sine_2 = th.sin(self.omega_0 * self.linear_2(sine_1))
+        return self.weight_2 * (input + sine_2)
 
-            self.net.append(final_linear)
-        else:
-            self.net.append(
-                SineLayer(
-                    hidden_features,
-                    out_features,
-                    is_first=False,
-                    omega_0=hidden_omega_0,
-                )
-            )
+    #
 
-        self.net = nn.Sequential(*self.net)
 
-    def forward(self, coords):
-        output = self.net(coords)
-        return output
+#
 
-    def forward_with_activations(self, coords, retain_grad=False):
-        """Returns not only model output, but also intermediate activations.
-        Only used for visualizing activations later!"""
-        activations = OrderedDict()
 
-        activation_count = 0
-        x = coords.clone().detach().requires_grad_(True)
-        activations["input"] = x
-        for i, layer in enumerate(self.net):
-            if isinstance(layer, SineLayer):
-                x, intermed = layer.forward_with_intermediate(x)
+def compute_num_neurons(opt, target_size):
+    # relevant options
+    d_in = opt.d_in
+    d_out = opt.d_out
 
-                if retain_grad:
-                    x.retain_grad()
-                    intermed.retain_grad()
+    def network_size(neurons):
+        layers = [d_in]
+        layers.extend([neurons] * opt.n_layers)
+        layers.append(d_out)
+        n_layers = len(layers) - 1
 
-                activations[
-                    "_".join((str(layer.__class__), "%d" % activation_count))
-                ] = intermed
-                activation_count += 1
+        n_params = 0
+        for ndx in np.arange(n_layers):
+            layer_in = layers[ndx]
+            layer_out = layers[ndx + 1]
+            og_layer_in = max(layer_in, layer_out)
+
+            if ndx == 0 or ndx == (n_layers - 1):
+                n_params += (layer_in + 1) * layer_out
+            #
             else:
-                x = layer(x)
+                if opt.is_residual:
+                    is_shortcut = layer_in != layer_out
+                    if is_shortcut:
+                        n_params += (layer_in * layer_out) + layer_out
+                    n_params += (layer_in * og_layer_in) + og_layer_in
+                    n_params += (og_layer_in * layer_out) + layer_out
+                else:
+                    n_params += (layer_in + 1) * layer_out
+                #
+            #
+        #
 
-                if retain_grad:
-                    x.retain_grad()
+        return n_params
 
-            activations["_".join((str(layer.__class__), "%d" % activation_count))] = x
-            activation_count += 1
+    #
 
-        return activations
+    min_neurons = 16
+    while network_size(min_neurons) < target_size:
+        min_neurons += 1
+    min_neurons -= 1
+
+    return min_neurons
+
+
+#
+
+
+class FieldNet(nn.Module):
+    def __init__(self, opt):
+        super(FieldNet, self).__init__()
+
+        self.d_in = opt.d_in
+        self.layers = [self.d_in]
+        self.layers.extend(opt.layers)
+        self.d_out = opt.d_out
+        self.layers.append(self.d_out)
+        self.n_layers = len(self.layers) - 1
+        self.w0 = opt.w0
+        self.is_residual = opt.is_residual
+
+        self.net_layers = nn.ModuleList()
+        for ndx in np.arange(self.n_layers):
+            layer_in = self.layers[ndx]
+            layer_out = self.layers[ndx + 1]
+            if ndx != self.n_layers - 1:
+                if not self.is_residual:
+                    self.net_layers.append(
+                        SineLayer(layer_in, layer_out, bias=True, is_first=ndx == 0)
+                    )
+                    continue
+                #
+
+                if ndx == 0:
+                    self.net_layers.append(
+                        SineLayer(layer_in, layer_out, bias=True, is_first=ndx == 0)
+                    )
+                else:
+                    self.net_layers.append(
+                        ResidualSineLayer(
+                            layer_in,
+                            bias=True,
+                            ave_first=ndx > 1,
+                            ave_second=ndx == (self.n_layers - 2),
+                        )
+                    )
+                #
+            else:
+                final_linear = nn.Linear(layer_in, layer_out)
+                with th.no_grad():
+                    final_linear.weight.uniform_(
+                        -np.sqrt(6 / (layer_in)) / 30.0, np.sqrt(6 / (layer_in)) / 30.0
+                    )
+                self.net_layers.append(final_linear)
+            #
+        #
+
+    #
+
+    def forward(self, input):
+        batch_size = input.shape[0]
+        out = input
+        for ndx, net_layer in enumerate(self.net_layers):
+            out = net_layer(out)
+        #
+        return out
+
+    #
+
+
+#

@@ -1,0 +1,26 @@
+{
+    "beechnut": [
+        {
+            "lrate": 0.01,
+            "lrate_decay": 18,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 2,
+            "n_features_per_level": 8,
+            "per_level_scale": 1.1,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": [
+                10,
+                11,
+                12,
+                13,
+                14,
+                15,
+                16
+            ],
+            "zfp_enc": 0.02,
+            "zfp_mlp": 0.01
+        }
+    ]
+}
