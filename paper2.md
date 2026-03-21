@@ -2,21 +2,50 @@
 
 ## Network Architectures
 
+NOTE: exact network configurations will be included in appendix
+
+### All networks
+
+All networks use the same input and output dimensions. Input is 3D floating point coordinates, output is 1D value (also floating point).
+
+We fix the number of neurons per layer to 16 for all networks.
+We also fix by dataset the following:
+- lrate
+- lrate_decay
+- epochs
+
+NOTE: KAN abides by a fundamentally different function approximation paradigm than MLPs and SIRENs. Therefore, attributes like the number of neurons or layers are not directly comparable between KAN and the other architectures. We compare using bit rate distortion plot with the compression ratio (data size / model size) as the independent variable (horizontal axis) and reconstruction performance metrics as the dependent variable (vertical axis).
+
+
 ### Baseline comparisons
 
 MLP
-- tinycudann implementation
+- tinycudann implementation (fused MLP)
+- ReLU activation
+- Variable number of layers in [1, 4]
 
 SIREN
-- tinycudann implementation
+- tinycudann implementation (fused SIREN)
+- Sine activation
+- Variable number of layers in [1, 4]
+
+NOTE: lrate decay is adjusted for SIREN in accordance with SIREN paper
+
+### HashGrid
+
+- tinycudann implementation (fused)
+- Variable number of levels in [1, 2]
+- Variable number of features per level in [4, 8]
+- Variable log2_hashmap_size in [16, 24]
+- Variable base_resolution in [16, 64]
+- Variable per_level_scale in [1.5, 2.0]
 
 ### KAN
 
 Efficient KAN implementation
-- Reformulates activation computation: instead of expanding inputs to `(batch_size, out_features, in_features)` for per-edge activations, it evaluates the shared B-spline basis functions first, then combines them linearly. This reduces memory and turns the operation into a standard matrix multiplication compatible with both forward and backward passes.
 - Replaces the paper's sample-based L1 regularization (which requires non-linear operations on the expanded tensor) with a weight-based L1 regularization on the spline coefficients, since the original regularization is incompatible with the efficient reformulation.
-- Includes an optional per-activation learnable scale (`spline_scaler`, controlled by `enable_standalone_scale_spline`), matching the original implementation. Disabling it improves efficiency but may hurt accuracy.
-- Uses Kaiming uniform initialization for `base_weight` and `spline_scaler` (instead of constant initialization), which significantly improved MNIST performance (~20% to ~97%).
+- Includes an per-activation learnable scale, matching the original implementation.
+- Uses Kaiming uniform initialization for `base_weight` and `spline_scaler` (instead of constant initialization).
 
 ## Datasets and Evaluation protocol
 
@@ -35,6 +64,7 @@ Efficient KAN implementation
 
 ## Training Configuration
 
+- Adam optimizer
 
 
 

@@ -1240,9 +1240,14 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
     params_file = OmegaConf.load(params_dir / filename)
     runs: List[RunParams] = []
 
+    network_type_override = None
     for seed in range(cfg.num_seeds):
         # Iterate through each dataset in the params file
         for dataset_name, params in params_file.items():
+            if dataset_name == "network_type":
+                network_type_override = params
+                continue
+
             for param in params:
                 # Parse non-encoder parameters first
                 n_neurons = param["n_neurons"]
@@ -1273,7 +1278,7 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                     if "num_grids_step" in kan_params:
                         num_grids_step = kan_params.num_grids_step
                     if "num_neurons" in kan_params:
-                        num_neurons = kan_params.num_neurons
+                        kan_neurons = kan_params.num_neurons
 
                 if isinstance(grid_radius, float) or isinstance(grid_radius, int):
                     grid_radius_bounds = [grid_radius]
@@ -1363,6 +1368,8 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                                     n_features_per_level_bounds[-1] + 1,
                                 ):
                                     for network_type in cfg.network_types:
+                                        if network_type_override is not None:
+                                            network_type = network_type_override
                                         partial_run_params = partial(
                                             RunParams,
                                             dataset_name=dataset_name,
@@ -1406,12 +1413,15 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                                                     ),
                                                     num_grids=int(num_grids),
                                                     num_grids_step=int(num_grids_step),
-                                                    kan_neurons=kan_neurons,
+                                                    num_neurons=kan_neurons,
                                                 )
                                                 run_params = partial_run_params(
                                                     kan_params=kan_params
                                                 )
                                                 runs.append(run_params)
+
+                                        if network_type_override is not None:
+                                            break
 
     # Apply filters if specified
     if cfg.dataset is not None:

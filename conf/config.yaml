@@ -15,7 +15,7 @@ repeats: 1           # number of times to repeat each experiment
 save_mode: null # save smallest or largest hashtable size for a given dataset INR
 
 # Model(s) to benchmark
-# network_types: ["fastkan", "mlp", "siren", "efficientkan"]
-network_types: ["siren", "mlp"]
+# network_types: ["mlp", "siren"]
+network_types: ["efficientkan"]
 
-num_seeds: 10
+num_seeds: 20
