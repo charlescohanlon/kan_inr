@@ -14,8 +14,6 @@
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
@@ -38,8 +36,6 @@
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
@@ -55,15 +51,13 @@
             "n_neurons": 16,
             "n_hidden_layers": [
                 1,
-                5   
+                5
             ],
             "n_levels": 2,
             "n_features_per_level": 4,
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
@@ -86,8 +80,6 @@
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
@@ -110,8 +102,6 @@
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
@@ -134,8 +124,6 @@
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
@@ -158,8 +146,6 @@
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
@@ -182,8 +168,6 @@
             "per_level_scale": 2.0,
             "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
             "log2_hashmap_size": [
-                0,
-                9,
                 10
             ],
             "kan_params": {
