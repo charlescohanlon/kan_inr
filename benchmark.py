@@ -6,7 +6,7 @@ representations on volumetric data, supporting both single-GPU and multi-GPU
 distributed training via PyTorch's DistributedDataParallel (DDP).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import partial
 import gc
 from typing import List, Optional, Tuple
@@ -46,7 +46,6 @@ class BenchmarkConfig:
 
     Attributes:
         params_file: Path to YAML file containing hyperparameter configurations
-        network_types: List of network architectures to benchmark (e.g., ["mlp", "kan"])
         home_dir: Base directory for all paths
         data_path: Relative path from home_dir to data directory
         batch_size: Training batch size (calculated automatically if None)
@@ -66,15 +65,6 @@ class BenchmarkConfig:
     """
 
     params_file: str = "params"
-    network_types: List[str] = field(
-        default_factory=lambda: [
-            "fastkan",
-            "mlp",
-            "fourierkan",
-            "siren",
-            "efficientkan",
-        ]
-    )
     home_dir: str = "/grand/insitu/cohanlon"
     data_path: str = "datasets/raw"
     params_path: str = "kan_inr/params"
@@ -291,6 +281,7 @@ def run_benchmark(
             base_resolution=params.base_resolution,
             per_level_scale=params.per_level_scale,
             kan_params=params.kan_params,
+            seed=params.seed,
         )
         model.to(device, non_blocking=True)
 
@@ -1218,10 +1209,11 @@ def parse_filename(data_path: str | Path):
 
 def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
     """
-    Parse parameter sweep configurations from YAML file.
+    Parse parameter sweep configurations from JSON file.
 
     Generates all combinations of parameters specified in the params file,
-    including parameter sweeps over hashmap sizes and network types.
+    including parameter sweeps over hashmap sizes. Each param dict must
+    specify its own network_type.
 
     Args:
         cfg: Benchmark configuration containing params file path
@@ -1240,13 +1232,9 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
     params_file = OmegaConf.load(params_dir / filename)
     runs: List[RunParams] = []
 
-    network_type_override = None
     for seed in range(cfg.num_seeds):
         # Iterate through each dataset in the params file
         for dataset_name, params in params_file.items():
-            if dataset_name == "network_type":
-                network_type_override = params
-                continue
 
             for param in params:
                 # Parse non-encoder parameters first
@@ -1346,6 +1334,9 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                         log2_hashmap_size_step,
                     )
 
+                # Read network_type from the param dict
+                network_type = param["network_type"]
+
                 # Generate runs for all combinations
                 for log2_hashmap_size in hashmap_sizes:
                     if dependent_base_resolution:
@@ -1367,61 +1358,55 @@ def parse_run_params(cfg: BenchmarkConfig) -> List[RunParams]:
                                     n_features_per_level_bounds[0],
                                     n_features_per_level_bounds[-1] + 1,
                                 ):
-                                    for network_type in cfg.network_types:
-                                        if network_type_override is not None:
-                                            network_type = network_type_override
-                                        partial_run_params = partial(
-                                            RunParams,
-                                            dataset_name=dataset_name,
-                                            network_type=network_type,
-                                            lrate=param["lrate"],
-                                            lrate_decay=param["lrate_decay"],
-                                            epochs=param["epochs"],
-                                            n_neurons=n_neurons,
-                                            n_hidden_layers=n_hidden_layers,
-                                            n_levels=n_levels,
-                                            n_features_per_level=n_features_per_level,
-                                            per_level_scale=per_level_scale,
-                                            base_resolution=base_resolution,
-                                            log2_hashmap_size=log2_hashmap_size,
-                                            zfp_enc=0,
-                                            zfp_mlp=0,
-                                            seed=int(seed),
+                                    partial_run_params = partial(
+                                        RunParams,
+                                        dataset_name=dataset_name,
+                                        network_type=network_type,
+                                        lrate=param["lrate"],
+                                        lrate_decay=param["lrate_decay"],
+                                        epochs=param["epochs"],
+                                        n_neurons=n_neurons,
+                                        n_hidden_layers=n_hidden_layers,
+                                        n_levels=n_levels,
+                                        n_features_per_level=n_features_per_level,
+                                        per_level_scale=per_level_scale,
+                                        base_resolution=base_resolution,
+                                        log2_hashmap_size=log2_hashmap_size,
+                                        zfp_enc=0,
+                                        zfp_mlp=0,
+                                        seed=int(seed),
+                                    )
+                                    if "kan" not in network_type.lower():
+                                        run_params = partial_run_params(
+                                            kan_params=None
                                         )
-                                        if "kan" not in network_type.lower():
+                                        runs.append(run_params)
+                                        continue
+
+                                    # KAN parameter sweeps
+                                    for grid_radius in np.arange(
+                                        grid_radius_bounds[0],
+                                        grid_radius_bounds[-1] + grid_radius_step,
+                                        grid_radius_step,  # Use arange for float steps
+                                    ):
+                                        for num_grids in range(
+                                            num_grids_bounds[0],
+                                            num_grids_bounds[-1] + num_grids_step,
+                                            num_grids_step,
+                                        ):
+                                            kan_params = KANParams(
+                                                grid_radius=float(grid_radius),
+                                                grid_radius_step=float(
+                                                    grid_radius_step
+                                                ),
+                                                num_grids=int(num_grids),
+                                                num_grids_step=int(num_grids_step),
+                                                num_neurons=kan_neurons,
+                                            )
                                             run_params = partial_run_params(
-                                                kan_params=None
+                                                kan_params=kan_params
                                             )
                                             runs.append(run_params)
-                                            continue
-
-                                        # KAN parameter sweeps
-                                        for grid_radius in np.arange(
-                                            grid_radius_bounds[0],
-                                            grid_radius_bounds[-1] + grid_radius_step,
-                                            grid_radius_step,  # Use arange for float steps
-                                        ):
-                                            for num_grids in range(
-                                                num_grids_bounds[0],
-                                                num_grids_bounds[-1] + num_grids_step,
-                                                num_grids_step,
-                                            ):
-                                                kan_params = KANParams(
-                                                    grid_radius=float(grid_radius),
-                                                    grid_radius_step=float(
-                                                        grid_radius_step
-                                                    ),
-                                                    num_grids=int(num_grids),
-                                                    num_grids_step=int(num_grids_step),
-                                                    num_neurons=kan_neurons,
-                                                )
-                                                run_params = partial_run_params(
-                                                    kan_params=kan_params
-                                                )
-                                                runs.append(run_params)
-
-                                        if network_type_override is not None:
-                                            break
 
     # Apply filters if specified
     if cfg.dataset is not None:

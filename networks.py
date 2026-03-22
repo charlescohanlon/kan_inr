@@ -360,7 +360,7 @@ class MLP_TCNN(torch.nn.Module):
         self,
         n_input_dims=3,
         n_output_dims=1,
-        bias=False,
+        bias=True,
         seed=1337,
         n_hidden_layers=3,
         n_neurons=64,
@@ -382,7 +382,7 @@ class MLP_TCNN(torch.nn.Module):
 
         self.n_hidden_layers = n_hidden_layers
         self.n_neurons = n_neurons
-        self.bias = False
+        self.bias = True
 
         self.network_config = network_config
 
@@ -420,6 +420,7 @@ class INR_Base(nn.Module):
         suppress_encoder_nan=False,
         special_mode="None",
         kan_params=None,
+        seed=1337,
     ):
         super(INR_Base, self).__init__()
 
@@ -486,6 +487,7 @@ class INR_Base(nn.Module):
             n_hidden_layers=n_hidden_layers,
             n_neurons=n_neurons,
             output_activation=output_activation,
+            seed=seed,
         )
 
         self.network_config = self.network.network_config
@@ -562,6 +564,7 @@ class EfficientKAN_Native(torch.nn.Module):
         grid_size=8,
         grid_radius=1.0,
         use_base_update=True,
+        seed=1337,
     ):
         super(EfficientKAN_Native, self).__init__()
 

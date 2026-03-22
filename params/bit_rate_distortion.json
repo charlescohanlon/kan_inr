@@ -1,0 +1,180 @@
+{
+    "beechnut": [
+        {
+            "network_type": "efficientkan",
+            "lrate": 0.01,
+            "lrate_decay": 18,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                8
+            ],
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 1.1,
+            "log2_hashmap_size": 0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "kan_params": {
+                "num_grids": 5,
+                "kan_neurons": 16
+            }
+        },
+        {
+            "network_type": "siren",
+            "lrate": 0.01,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                25
+            ],
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 2.0,
+            "log2_hashmap_size": 0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)"
+        },
+        {
+            "network_type": "mlp",
+            "lrate": 0.01,
+            "lrate_decay": 18,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 1.1,
+            "log2_hashmap_size": [
+                9,
+                10
+            ],
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)"
+        },
+        {
+            "network_type": "mlp",
+            "lrate": 0.01,
+            "lrate_decay": 18,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 2,
+            "n_features_per_level": 8,
+            "per_level_scale": 1.1,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": [
+                10,
+                12
+            ]
+        }
+    ],
+    "chameleon": [
+        {
+            "network_type": "efficientkan",
+            "lrate": 0.008,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                8
+            ],
+            "n_levels": 1,
+            "n_features_per_level": 4,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5,
+                "kan_neurons": 16
+            }
+        },
+        {
+            "network_type": "siren",
+            "lrate": 0.008,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                25
+            ],
+            "n_levels": 1,
+            "n_features_per_level": 4,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": 0
+        },
+        {
+            "network_type": "mlp",
+            "lrate": 0.008,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 1,
+            "n_features_per_level": 4,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": [
+                7,
+                12
+            ]
+        }
+    ],
+    "pawpawsaurus": [
+        {
+            "network_type": "efficientkan",
+            "lrate": 0.01,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                8
+            ],
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": 0,
+            "kan_params": {
+                "num_grids": 5,
+                "kan_neurons": 16
+            }
+        },
+        {
+            "network_type": "siren",
+            "lrate": 0.01,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": [
+                1,
+                25
+            ],
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": 0
+        },
+        {
+            "network_type": "mlp",
+            "lrate": 0.01,
+            "lrate_decay": 24,
+            "epochs": 24,
+            "n_neurons": 16,
+            "n_hidden_layers": 1,
+            "n_levels": 1,
+            "n_features_per_level": 8,
+            "per_level_scale": 2.0,
+            "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
+            "log2_hashmap_size": [
+                8,
+                12
+            ]
+        }
+    ]
+}
