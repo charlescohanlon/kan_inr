@@ -287,7 +287,7 @@ When `save_mode` is specified:
 
 ---
 
-## 🔬 Architecture Details
+## Architecture Details
 
 ### Multi-Resolution Hash Encoding
 - Implements InstantNGP-style spatial hash encoding
@@ -336,13 +336,13 @@ If you use this code in your research, please cite: (TODO: replace placeholders 
 
 ---
 
-## 📄 License
+## License
 
 MIT License - See LICENSE file for details
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
 
