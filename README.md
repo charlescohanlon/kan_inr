@@ -1,6 +1,6 @@
 # Kolmogorov-Arnold Neural Networks (KANs) for Implicit Neural Representations (INRs) of Volumetric Data
 
-A high-performance framework for training and benchmarking Implicit Neural Representations (INRs) using both traditional Multi-Layer Perceptrons (MLPs) and novel Kolmogorov-Arnold Networks (KANs) on volumetric scientific data.
+A high-performance framework for training and benchmarking Implicit Neural Representations (INRs) using both traditional Multi-Layer Perceptrons (MLPs), SIRENs, and novel Kolmogorov-Arnold Networks (KANs) on volumetric scientific data.
 
 ## Project Overview
 
@@ -8,7 +8,7 @@ This project implements a comprehensive benchmarking system for comparing differ
 
 ### Key Features
 
-- **Dual Architecture Support**: Seamlessly switch between MLP and KAN architectures for comparative analysis
+- **Dual Architecture Support**: Seamlessly switch between MLP, SIREN, and KAN architectures for comparative analysis
 - **Multi-Resolution Hash Encoding**: Implements the InstantNGP-style hash encoding for efficient spatial feature extraction
 - **Distributed Training**: Full support for multi-GPU training via PyTorch's DistributedDataParallel (DDP)
 - **Automated Benchmarking**: Comprehensive parameter sweep capabilities with automatic resource allocation
@@ -27,7 +27,7 @@ This project implements a comprehensive benchmarking system for comparing differ
 ## Installation
 
 ### Prerequisites
-- A100 GPU(s) w/ drivers installed
+- Nvidia GPU(s) w/ drivers installed
 
 ### Setup
 
@@ -232,7 +232,7 @@ python submit_jobs.py -cn config \
 The submission script automatically:
 - Estimates GPU requirements based on dataset size and model complexity
 - Calculates appropriate walltime based on empirical performance data
-- Selects optimal compute nodes (Sophia for ≤4 GPUs, Polaris for >4)
+- Selects optimal compute nodes
 - Manages queue slots to avoid overwhelming the scheduler
 
 ---
@@ -253,9 +253,7 @@ The `params.json` file defines the hyperparameter search space:
         "n_features_per_level": 4,
         "log2_hashmap_size": [14, 18],  // Range for sweep
         "per_level_scale": 2.0,
-        "base_resolution": "(int)cbrt(1<<log2_hashmap_size)",
-        "zfp_enc": 0.0,
-        "zfp_mlp": 0.0
+        "base_resolution": "(int)cbrt(1<<log2_hashmap_size)"
     }
 }
 ```
@@ -328,8 +326,8 @@ If you use this code in your research, please cite: (TODO: replace placeholders 
 ```bibtex
 @software{kan_inr_benchmark,
   title = {KAN-INR: Kolmogorov-Arnold Networks for Implicit Neural Representations},
-  author = {[Authors]},
-  year = {2024},
+  author = {Charles O'Hanlon},
+  year = {2025},
   url = {https://github.com/charlescohanlon/kan_inr}
 }
 ```
@@ -345,9 +343,3 @@ MIT License - See LICENSE file for details
 ## Contributing
 
 Contributions are welcome! Please feel free to submit pull requests or open issues for bugs and feature requests.
-
----
-
-## 📧 Contact
-
-For questions or collaborations, please open an issue on GitHub or contact the maintainers directly.
